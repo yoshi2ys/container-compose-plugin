@@ -1,0 +1,6 @@
+# CLI plugin manifest for `container compose`.
+# No [servicesConfig] section => PluginConfig.isCLI == true (no XPC, no launchd).
+# Installed at: /usr/local/libexec/container-plugins/compose/config.toml
+# with the binary at: /usr/local/libexec/container-plugins/compose/bin/compose
+abstract = "Define and run multi-container apps from a compose file"
+author = "yoshi2ys"

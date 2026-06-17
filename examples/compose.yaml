@@ -1,0 +1,14 @@
+# Try it:  container compose -f examples/compose.yaml up
+#          open http://localhost:8080   (nginx welcome page)
+#          container compose -f examples/compose.yaml ps
+#          container compose -f examples/compose.yaml down
+name: example
+services:
+  web:
+    image: nginx:latest
+    ports:
+      - "8080:80"
+  worker:
+    image: alpine:latest
+    command: ["sh", "-c", "echo worker started; sleep 3600"]
+    depends_on: [web]
