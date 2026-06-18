@@ -218,13 +218,16 @@ public enum ComposeTranslate {
     /// this stays pure (the CLI injects a `FileManager` probe; tests inject a fake).
     /// Flags bind sources that point at a file — Apple `container` bind-mounts
     /// directories only, and would otherwise fail with a cryptic "not a directory".
+    /// `services`, when non-nil, restricts the check to those service names — pass the
+    /// profile-included set so `up --profile …` doesn't warn about services it won't start.
     public static func preflightWarnings(
         project: ComposeProject,
         options: TranslateOptions = TranslateOptions(),
+        services: Set<String>? = nil,
         kind: (String) -> PathKind
     ) -> [Warning] {
         var warnings: [Warning] = []
-        for name in project.serviceNames {
+        for name in project.serviceNames where services?.contains(name) ?? true {
             guard let svc = project.services[name] else { continue }
             for volume in svc.volumes {
                 guard case .bind(let source, _, _) = volume else { continue }

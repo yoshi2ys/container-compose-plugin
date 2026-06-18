@@ -1,3 +1,4 @@
+import ComposeGraph
 import ComposeModel
 import ComposeTranslate
 import ContainerEngine
@@ -63,7 +64,8 @@ struct ComposeCLI {
             case "up":
                 let (project, warnings, baseDirectory) = try loadProject(file: file)
                 printWarnings(warnings)
-                printWarnings(preflight(project: project, baseDirectory: baseDirectory))
+                let included = ComposeGraph.includedServices(project, activeProfiles: profiles)
+                printWarnings(preflight(project: project, baseDirectory: baseDirectory, services: included))
                 let options = TranslateOptions(baseDirectory: baseDirectory)
                 let runWarnings = try await orchestrator.up(
                     project: project, activeProfiles: profiles, options: options)
@@ -112,11 +114,14 @@ struct ComposeCLI {
     }
 
     /// Filesystem preflight: flag bind sources that point at a file (Apple `container`
-    /// bind-mounts directories only).
-    private static func preflight(project: ComposeProject, baseDirectory: String) -> [Warning] {
+    /// bind-mounts directories only). Restricted to `services` (the profile-included set).
+    private static func preflight(
+        project: ComposeProject, baseDirectory: String, services: Set<String>
+    ) -> [Warning] {
         ComposeTranslate.preflightWarnings(
             project: project,
-            options: TranslateOptions(baseDirectory: baseDirectory)
+            options: TranslateOptions(baseDirectory: baseDirectory),
+            services: services
         ) { path in
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else { return .missing }

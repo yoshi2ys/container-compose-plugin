@@ -57,7 +57,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "compose",
-            dependencies: ["ComposeModel", "ComposeTranslate", "ContainerEngine"],
+            dependencies: ["ComposeModel", "ComposeGraph", "ComposeTranslate", "ContainerEngine"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
     ]

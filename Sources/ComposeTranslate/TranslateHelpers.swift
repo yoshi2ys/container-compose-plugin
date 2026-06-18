@@ -85,8 +85,8 @@ extension ComposeTranslate {
         if let healthcheck = svc.healthcheck, healthcheck.disable != true, !healthcheck.test.isEmpty {
             warnings.append(Warning(
                 kind: .engineGap(.healthcheck), service: serviceName, key: "healthcheck",
-                message: "Apple container has no native healthchecks; this plugin runs this check at `up` only to gate a dependent's `depends_on: service_healthy`.",
-                severity: .info))
+                message: "Apple container does not run healthchecks continuously; this plugin runs the check only at `up`, to gate a dependent's `depends_on: service_healthy` (it is not re-run after start).",
+                severity: .warning))
         }
     }
 

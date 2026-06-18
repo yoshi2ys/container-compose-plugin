@@ -254,6 +254,25 @@ struct ComposeTranslateTests {
         }
     }
 
+    @Test("preflight only checks services in the included set (profiles)")
+    func preflightRespectsServiceFilter() throws {
+        let proj = try project("""
+        services:
+          web:
+            image: nginx
+            volumes: ["./conf/site.conf:/etc/nginx/conf.d/site.conf"]
+          tool:
+            image: busybox
+            volumes: ["./conf/tool.conf:/etc/tool.conf"]
+        """)
+        let opts = TranslateOptions(baseDirectory: "/base")
+        // treat every bind source as a file; only `web` is included → only it is flagged.
+        let warnings = ComposeTranslate.preflightWarnings(
+            project: proj, options: opts, services: ["web"]) { _ in .file }
+        #expect(warnings.count == 1)
+        #expect(warnings.first?.service == "web")
+    }
+
     // MARK: helper
 
     private func containsSlice(_ array: [String], _ slice: [String]) -> Bool {
