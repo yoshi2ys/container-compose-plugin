@@ -96,6 +96,26 @@ named), `depends_on`, `networks`, `deploy.resources.limits` (`cpus`, `memory`),
 
 Unsupported keys are **reported as warnings**, never silently dropped.
 
+## What the plugin handles for you
+
+Apple `container` has rough edges that this plugin smooths over at `up` time:
+
+- **Builder auto-start** — if any service has a `build:`, the BuildKit builder is
+  started on demand (otherwise `container build` hangs and times out).
+- **Compose-relative paths** — `build.context`, bind `source`, and `env_file`
+  resolve against the **compose file's directory**, so `-f path/to/compose.yaml`
+  works from any working directory (matching Docker Compose).
+- **`HOST_GATEWAY` injection** — every container gets `HOST_GATEWAY=<host gateway IP>`
+  (a `host.docker.internal` stand-in), so apps can reach host-published ports of
+  sibling services despite there being no service-name DNS.
+- **`depends_on: service_healthy` / `service_completed_successfully`** — emulated by
+  polling the dependency's `healthcheck` (via `container exec`) or its run state
+  before starting dependents. Bounded by the healthcheck's retries/interval.
+- **Idempotent `up`** — each container is recreated (stale one removed first), so a
+  re-run recovers cleanly from a partial start. Named volumes persist.
+- **Bind-mount preflight** — a bind `source` that points at a file (Apple `container`
+  mounts directories only) is flagged before it fails cryptically.
+
 ## Limitations (Apple `container` gaps)
 
 These are surfaced as warnings at `up` time:
@@ -103,11 +123,11 @@ These are surfaced as warnings at `up` time:
 | Compose feature | Behavior here |
 |---|---|
 | `restart` | No restart policy in `container`; warned (not enforced) |
-| `healthcheck` / `depends_on: service_healthy` | No healthchecks; ordering falls back to **start-order only** |
-| service-name DNS | Containers don't resolve each other by name; reach services via published ports |
+| `healthcheck` | No native healthchecks; the plugin **emulates** `depends_on: service_healthy` by polling the check at `up` (exit status of a completed container is unverifiable, though) |
+| service-name DNS | Containers don't resolve each other by name; reach siblings via the injected `HOST_GATEWAY` + their published ports |
 | multiple `networks` per service | Only the first network is attached; the rest are warned |
 | port ranges | Single ports only |
-| bind mounts | May be read-only for non-root container users (runtime limitation) |
+| bind mounts | Directories only (files are flagged); may be read-only for non-root container users |
 | privileged host ports (<1024) | May require elevated permissions on macOS |
 
 `ps` and `logs` pass through to `container`. Reach a published service on the host

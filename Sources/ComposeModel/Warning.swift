@@ -20,6 +20,7 @@ public struct Warning: Sendable, Hashable {
         case readOnlyBindNonRoot
         case privilegedPort
         case tmpfsSize
+        case bindFileNotDirectory
     }
 
     public enum Kind: Sendable, Hashable {

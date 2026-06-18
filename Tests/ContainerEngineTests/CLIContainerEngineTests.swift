@@ -55,7 +55,8 @@ struct CLIContainerEngineTests {
         await #expect(throws: EngineError(argv: ["build", "-t", "t", "."], exitCode: 3, stderr: "")) {
             try await engine.build(argv: ["build", "-t", "t", "."])
         }
-        #expect(runner.calls[0].arguments == ["container", "build", "-t", "t", "."])
+        // the engine forces `--progress plain` after the `build` subcommand.
+        #expect(runner.calls[0].arguments == ["container", "build", "--progress", "plain", "-t", "t", "."])
     }
 
     @Test("systemRunning reflects exit code")
@@ -72,6 +73,40 @@ struct CLIContainerEngineTests {
 
         runner.result = ProcessResult(stdout: Data(), stderr: Data("apiserver is not running".utf8), exitCode: 1)
         #expect(try await engine.systemRunning() == false)
+    }
+
+    @Test("builderRunning reads the status text, not the exit code")
+    func builderRunning() async throws {
+        let runner = FakeRunner()
+        let engine = CLIContainerEngine(runner: runner)
+
+        runner.result = ProcessResult(stdout: Data("ID        STATE\nbuildkit  running".utf8), stderr: Data(), exitCode: 0)
+        #expect(try await engine.builderRunning() == true)
+
+        runner.result = ProcessResult(stdout: Data("builder is not running".utf8), stderr: Data(), exitCode: 0)
+        #expect(try await engine.builderRunning() == false)
+    }
+
+    @Test("startBuilder runs `builder start` via inherited IO and throws on non-zero")
+    func startBuilder() async throws {
+        let runner = FakeRunner()
+        let engine = CLIContainerEngine(runner: runner)
+        try await engine.startBuilder()
+        #expect(runner.calls[0].arguments == ["container", "builder", "start"])
+
+        runner.inheritExit = 1
+        await #expect(throws: EngineError.self) { try await engine.startBuilder() }
+    }
+
+    @Test("hostGateway extracts ipv4Gateway from the default-network inspect JSON (strips CIDR)")
+    func hostGateway() async throws {
+        let runner = FakeRunner()
+        let json = #"[{"id":"default","status":{"ipv4Gateway":"192.168.64.1","ipv4Subnet":"192.168.64.0/24"}}]"#
+        runner.result = ProcessResult(stdout: Data(json.utf8), stderr: Data(), exitCode: 0)
+        let engine = CLIContainerEngine(runner: runner)
+
+        #expect(try await engine.hostGateway() == "192.168.64.1")
+        #expect(runner.calls[0].arguments == ["container", "network", "inspect", "default"])
     }
 
     @Test("stop and remove build the expected argv")
