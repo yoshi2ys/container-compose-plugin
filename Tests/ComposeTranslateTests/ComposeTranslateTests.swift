@@ -177,6 +177,117 @@ struct ComposeTranslateTests {
         #expect(result.warnings.contains { $0.severity == .blocking })
     }
 
+    @Test("baseDirectory resolves relative build/bind/env_file paths; leaves absolute & named")
+    func baseDirectoryResolution() throws {
+        let proj = try project("""
+        name: demo
+        services:
+          api:
+            build:
+              context: ./api
+              dockerfile: Dockerfile
+            env_file: ./env/api.env
+            volumes:
+              - ./src:/var/www/html
+              - /etc/hosts:/host-hosts
+              - data:/data
+        volumes:
+          data:
+        """)
+        let opts = TranslateOptions(baseDirectory: "/abs/base")
+        let run = ComposeTranslate.runArgs(serviceName: "api", project: proj, options: opts)
+        // relative bind → absolutized against the base dir
+        #expect(containsSlice(run.argv, ["--mount", "type=bind,source=/abs/base/src,target=/var/www/html"]))
+        // absolute bind → unchanged
+        #expect(containsSlice(run.argv, ["--mount", "type=bind,source=/etc/hosts,target=/host-hosts"]))
+        // named volume → not treated as a path
+        #expect(containsSlice(run.argv, ["--mount", "type=volume,source=data,target=/data"]))
+        // env_file → absolutized
+        #expect(containsSlice(run.argv, ["--env-file", "/abs/base/env/api.env"]))
+
+        let build = try #require(ComposeTranslate.buildArgs(serviceName: "api", project: proj, baseDirectory: "/abs/base"))
+        #expect(build.argv.last == "/abs/base/api")                       // context
+        #expect(containsSlice(build.argv, ["-f", "/abs/base/api/Dockerfile"]))  // dockerfile vs context
+    }
+
+    @Test("baseDirectory nil leaves paths verbatim (back-compat)")
+    func baseDirectoryNilVerbatim() throws {
+        let proj = try project("""
+        services:
+          a:
+            image: x
+            volumes: ["./src:/work"]
+        """)
+        let run = ComposeTranslate.runArgs(serviceName: "a", project: proj)
+        #expect(containsSlice(run.argv, ["--mount", "type=bind,source=./src,target=/work"]))
+    }
+
+    @Test("hostGateway is injected as HOST_GATEWAY env into the run")
+    func hostGatewayInjection() throws {
+        let proj = try project("services:\n  a:\n    image: x\n")
+        let opts = TranslateOptions(hostGateway: "192.168.64.1")
+        let run = ComposeTranslate.runArgs(serviceName: "a", project: proj, options: opts)
+        #expect(containsSlice(run.argv, ["-e", "HOST_GATEWAY=192.168.64.1"]))
+        // not injected when unset
+        let bare = ComposeTranslate.runArgs(serviceName: "a", project: proj)
+        #expect(!bare.argv.contains("HOST_GATEWAY=192.168.64.1"))
+    }
+
+    @Test("an explicit HOST_GATEWAY in environment is not overridden by the injected one")
+    func hostGatewayDoesNotClobberUserValue() throws {
+        let proj = try project("""
+        services:
+          a:
+            image: x
+            environment:
+              HOST_GATEWAY: "10.0.0.9"
+        """)
+        let opts = TranslateOptions(hostGateway: "192.168.64.1")
+        let run = ComposeTranslate.runArgs(serviceName: "a", project: proj, options: opts)
+        #expect(containsSlice(run.argv, ["-e", "HOST_GATEWAY=10.0.0.9"]))     // user value kept
+        #expect(!run.argv.contains("HOST_GATEWAY=192.168.64.1"))             // injected one skipped
+    }
+
+    @Test("preflight flags a bind source that is a file, not a directory")
+    func preflightBindFile() throws {
+        let proj = try project("""
+        services:
+          web:
+            image: nginx
+            volumes:
+              - ./conf/site.conf:/etc/nginx/conf.d/site.conf
+              - ./html:/usr/share/nginx/html
+        """)
+        let opts = TranslateOptions(baseDirectory: "/base")
+        let warnings = ComposeTranslate.preflightWarnings(project: proj, options: opts) { path in
+            path == "/base/conf/site.conf" ? .file : .directory
+        }
+        #expect(warnings.count == 1)
+        #expect(warnings.first?.service == "web")
+        if case .engineGap(.bindFileNotDirectory) = warnings.first?.kind {} else {
+            Issue.record("expected bindFileNotDirectory warning")
+        }
+    }
+
+    @Test("preflight only checks services in the included set (profiles)")
+    func preflightRespectsServiceFilter() throws {
+        let proj = try project("""
+        services:
+          web:
+            image: nginx
+            volumes: ["./conf/site.conf:/etc/nginx/conf.d/site.conf"]
+          tool:
+            image: busybox
+            volumes: ["./conf/tool.conf:/etc/tool.conf"]
+        """)
+        let opts = TranslateOptions(baseDirectory: "/base")
+        // treat every bind source as a file; only `web` is included → only it is flagged.
+        let warnings = ComposeTranslate.preflightWarnings(
+            project: proj, options: opts, services: ["web"]) { _ in .file }
+        #expect(warnings.count == 1)
+        #expect(warnings.first?.service == "web")
+    }
+
     // MARK: helper
 
     private func containsSlice(_ array: [String], _ slice: [String]) -> Bool {

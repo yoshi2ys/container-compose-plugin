@@ -33,12 +33,14 @@ extension ComposeTranslate {
 
     static func appendVolumes(
         _ svc: Service,
-        into argv: inout [String], warnings: inout [Warning], serviceName: String
+        into argv: inout [String], warnings: inout [Warning], serviceName: String,
+        baseDirectory: String? = nil
     ) {
         for volume in svc.volumes {
             switch volume {
             case .bind(let source, let target, let readOnly):
-                var mount = "type=bind,source=\(source),target=\(target)"
+                let resolvedSource = resolvePath(source, relativeTo: baseDirectory)
+                var mount = "type=bind,source=\(resolvedSource),target=\(target)"
                 if readOnly { mount += ",readonly" }
                 argv += ["--mount", mount]
                 if !readOnly {
@@ -83,7 +85,7 @@ extension ComposeTranslate {
         if let healthcheck = svc.healthcheck, healthcheck.disable != true, !healthcheck.test.isEmpty {
             warnings.append(Warning(
                 kind: .engineGap(.healthcheck), service: serviceName, key: "healthcheck",
-                message: "Apple container does not run healthchecks; dependents fall back to start-order only.",
+                message: "Apple container does not run healthchecks continuously; this plugin runs the check only at `up`, to gate a dependent's `depends_on: service_healthy` (it is not re-run after start).",
                 severity: .warning))
         }
     }

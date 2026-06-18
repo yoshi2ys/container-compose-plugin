@@ -1,4 +1,5 @@
 import ComposeModel
+import Foundation
 
 /// Labels stamped on every container so we can reconstruct project/service
 /// ownership from `container list --format json`.
@@ -13,12 +14,34 @@ public struct TranslateOptions: Sendable {
     public var removeOnExit: Bool
     /// When set, `--cidfile <path>` is added so the engine can capture the real ID.
     public var cidfilePath: String?
+    /// Directory of the compose file. Relative `build`/bind/`env_file` paths resolve
+    /// against this (Compose semantics), not the process CWD. `nil` leaves paths verbatim.
+    public var baseDirectory: String?
+    /// Host gateway IP injected into every container as `HOST_GATEWAY` (a
+    /// `host.docker.internal` stand-in, since Apple `container` has no service DNS).
+    public var hostGateway: String?
 
-    public init(detach: Bool = true, removeOnExit: Bool = false, cidfilePath: String? = nil) {
+    public init(
+        detach: Bool = true,
+        removeOnExit: Bool = false,
+        cidfilePath: String? = nil,
+        baseDirectory: String? = nil,
+        hostGateway: String? = nil
+    ) {
         self.detach = detach
         self.removeOnExit = removeOnExit
         self.cidfilePath = cidfilePath
+        self.baseDirectory = baseDirectory
+        self.hostGateway = hostGateway
     }
+}
+
+/// The kind of filesystem entry at a path (injected into `preflightWarnings` so the
+/// pure translator stays filesystem-free; the CLI supplies a `FileManager`-backed probe).
+public enum PathKind: Sendable, Equatable {
+    case missing
+    case file
+    case directory
 }
 
 public struct TranslationResult: Sendable, Equatable {
@@ -68,7 +91,14 @@ public enum ComposeTranslate {
         for e in svc.environment.entries {
             argv += ["-e", e.value.map { "\(e.key)=\($0)" } ?? e.key]
         }
-        for file in svc.envFile { argv += ["--env-file", file] }
+        // Inject the host gateway, but never override an explicit `environment:` value.
+        if let gateway = options.hostGateway,
+            !svc.environment.entries.contains(where: { $0.key == "HOST_GATEWAY" }) {
+            argv += ["-e", "HOST_GATEWAY=\(gateway)"]
+        }
+        for file in svc.envFile {
+            argv += ["--env-file", resolvePath(file, relativeTo: options.baseDirectory)]
+        }
 
         if let wd = svc.workingDir { argv += ["-w", wd] }
         if let user = svc.user { argv += ["-u", user] }
@@ -95,7 +125,8 @@ public enum ComposeTranslate {
         }
 
         appendPorts(svc, serviceName: serviceName, into: &argv, warnings: &warnings)
-        appendVolumes(svc, into: &argv, warnings: &warnings, serviceName: serviceName)
+        appendVolumes(svc, into: &argv, warnings: &warnings, serviceName: serviceName,
+                      baseDirectory: options.baseDirectory)
         appendNetworks(svc, serviceName: serviceName, into: &argv, warnings: &warnings)
         appendGaps(svc, serviceName: serviceName, warnings: &warnings)
 
@@ -120,20 +151,29 @@ public enum ComposeTranslate {
     // MARK: build
 
     /// `nil` when the service has no `build:` section.
+    ///
+    /// With `baseDirectory` set, the `context` resolves against the compose file's
+    /// directory and `dockerfile` against the resolved context (Compose semantics).
     public static func buildArgs(
         serviceName: String,
-        project: ComposeProject
+        project: ComposeProject,
+        baseDirectory: String? = nil
     ) -> (argv: [String], tag: String)? {
         guard let svc = project.services[serviceName], let build = svc.build else { return nil }
         let tag = derivedTag(projectName: project.name ?? "compose", serviceName: serviceName)
+        let context = resolvePath(build.context, relativeTo: baseDirectory)
         var argv = ["build", "-t", tag]
-        if let dockerfile = build.dockerfile { argv += ["-f", dockerfile] }
+        if let dockerfile = build.dockerfile {
+            // Against the resolved context — a no-op unless `context` is absolute, i.e.
+            // unless `baseDirectory` was set (`resolvePath` only resolves an absolute base).
+            argv += ["-f", resolvePath(dockerfile, relativeTo: context)]
+        }
         for arg in build.args.entries {
             argv += ["--build-arg", arg.value.map { "\(arg.key)=\($0)" } ?? arg.key]
         }
         if let target = build.target { argv += ["--target", target] }
         if let platform = svc.platform { argv += ["--platform", platform] }
-        argv += [build.context]
+        argv += [context]
         return (argv, tag)
     }
 
@@ -174,9 +214,55 @@ public enum ComposeTranslate {
         return result
     }
 
+    // MARK: preflight
+
+    /// Filesystem-dependent checks run before `up`. `kind` probes a path's type so
+    /// this stays pure (the CLI injects a `FileManager` probe; tests inject a fake).
+    /// Flags bind sources that point at a file — Apple `container` bind-mounts
+    /// directories only, and would otherwise fail with a cryptic "not a directory".
+    /// `services`, when non-nil, restricts the check to those service names — pass the
+    /// profile-included set so `up --profile …` doesn't warn about services it won't start.
+    public static func preflightWarnings(
+        project: ComposeProject,
+        options: TranslateOptions = TranslateOptions(),
+        services: Set<String>? = nil,
+        kind: (String) -> PathKind
+    ) -> [Warning] {
+        var warnings: [Warning] = []
+        for name in project.serviceNames where services?.contains(name) ?? true {
+            guard let svc = project.services[name] else { continue }
+            for volume in svc.volumes {
+                guard case .bind(let source, _, _) = volume else { continue }
+                guard kind(resolvePath(source, relativeTo: options.baseDirectory)) == .file else { continue }
+                warnings.append(Warning(
+                    kind: .engineGap(.bindFileNotDirectory), service: name, key: "volumes",
+                    message: "Bind source '\(source)' is a file; Apple container bind-mounts directories only — mount its parent directory instead.",
+                    severity: .warning))
+            }
+        }
+        return warnings.sortedForDisplay()
+    }
+
     // MARK: helpers
 
     static func derivedTag(projectName: String, serviceName: String) -> String {
         "\(projectName)-\(serviceName.lowercased()):compose"
+    }
+
+    /// Absolutize a relative path against `baseDirectory` (lexically — no filesystem
+    /// access, so `..`/`.` are folded but symlinks are not resolved). Absolute and
+    /// `~`-prefixed paths, and the `nil`/empty base case, are returned unchanged.
+    static func resolvePath(_ path: String, relativeTo baseDirectory: String?) -> String {
+        // Resolve only against an absolute base; a relative/empty/nil base, or an already
+        // absolute / `~` path, is returned unchanged (you can't absolutize against a
+        // non-absolute anchor, so the no-base case falls out without a special case).
+        // Also leave empty and URL/git build contexts (`scheme://…`) untouched — joining
+        // them to the base would silently produce a bogus local path.
+        guard let baseDirectory, baseDirectory.hasPrefix("/"),
+            !path.isEmpty, !path.contains("://"),
+            !path.hasPrefix("/"), !path.hasPrefix("~")
+        else { return path }
+        let base = URL(fileURLWithPath: baseDirectory, isDirectory: true)
+        return URL(fileURLWithPath: path, relativeTo: base).standardizedFileURL.path
     }
 }

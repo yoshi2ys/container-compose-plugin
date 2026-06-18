@@ -1,4 +1,6 @@
+import ComposeGraph
 import ComposeModel
+import ComposeTranslate
 import ContainerEngine
 import Foundation
 
@@ -60,20 +62,24 @@ struct ComposeCLI {
 
             switch command {
             case "up":
-                let (project, warnings) = try loadProject(file: file)
+                let (project, warnings, baseDirectory) = try loadProject(file: file)
                 printWarnings(warnings)
-                let runWarnings = try await orchestrator.up(project: project, activeProfiles: profiles)
+                let included = ComposeGraph.includedServices(project, activeProfiles: profiles)
+                printWarnings(preflight(project: project, baseDirectory: baseDirectory, services: included))
+                let options = TranslateOptions(baseDirectory: baseDirectory)
+                let runWarnings = try await orchestrator.up(
+                    project: project, activeProfiles: profiles, options: options)
                 printWarnings(runWarnings)
-                print("Started \(project.serviceNames.count) service(s).")
+                print("Started \(included.count) service(s).")
             case "down":
-                let (project, _) = try loadProject(file: file)
+                let (project, _, _) = try loadProject(file: file)
                 try await orchestrator.down(project: project, activeProfiles: profiles)
                 print("Removed \(project.name ?? "compose").")
             case "ps":
                 let code = try await orchestrator.ps()
                 exit(code)
             case "logs":
-                let (project, _) = try loadProject(file: file)
+                let (project, _, _) = try loadProject(file: file)
                 if let service = extras.first, project.services[service] == nil {
                     fail("no such service: \(service)")
                 }
@@ -95,12 +101,32 @@ struct ComposeCLI {
 
     // MARK: - helpers
 
-    private static func loadProject(file: String?) throws -> (ComposeProject, [Warning]) {
+    private static func loadProject(
+        file: String?
+    ) throws -> (project: ComposeProject, warnings: [Warning], baseDirectory: String) {
         let path = try resolveFile(file)
         let yaml = try String(contentsOfFile: path, encoding: .utf8)
-        let dirName = URL(fileURLWithPath: path).deletingLastPathComponent().lastPathComponent
-        let result = try ComposeParser.parse(yaml, projectNameFallback: dirName)
-        return (result.project, result.warnings)
+        // Absolute dir of the compose file; relative build/bind/env_file paths resolve
+        // against this (Compose semantics), so `up` works regardless of the shell CWD.
+        let directory = URL(fileURLWithPath: path).deletingLastPathComponent()
+        let result = try ComposeParser.parse(yaml, projectNameFallback: directory.lastPathComponent)
+        return (result.project, result.warnings, directory.path)
+    }
+
+    /// Filesystem preflight: flag bind sources that point at a file (Apple `container`
+    /// bind-mounts directories only). Restricted to `services` (the profile-included set).
+    private static func preflight(
+        project: ComposeProject, baseDirectory: String, services: Set<String>
+    ) -> [Warning] {
+        ComposeTranslate.preflightWarnings(
+            project: project,
+            options: TranslateOptions(baseDirectory: baseDirectory),
+            services: services
+        ) { path in
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else { return .missing }
+            return isDirectory.boolValue ? .directory : .file
+        }
     }
 
     private static func resolveFile(_ file: String?) throws -> String {
