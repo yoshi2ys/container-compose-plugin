@@ -70,7 +70,7 @@ struct ComposeCLI {
                 let runWarnings = try await orchestrator.up(
                     project: project, activeProfiles: profiles, options: options)
                 printWarnings(runWarnings)
-                print("Started \(project.serviceNames.count) service(s).")
+                print("Started \(included.count) service(s).")
             case "down":
                 let (project, _, _) = try loadProject(file: file)
                 try await orchestrator.down(project: project, activeProfiles: profiles)

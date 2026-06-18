@@ -233,6 +233,28 @@ struct OrchestratorTests {
         #expect(ops.filter { $0 == "state:demo-seed" }.count == 2)
     }
 
+    @Test("up warns when a completed dependency's exit status can't be verified")
+    func upWarnsUnverifiableCompletion() async throws {
+        let proj = try project("""
+        name: demo
+        services:
+          seed:
+            image: busybox
+          app:
+            image: x
+            depends_on:
+              seed:
+                condition: service_completed_successfully
+        """)
+        let mock = MockEngine()
+        // stops with no exit code (the real Apple container case)
+        await mock.setStates([ContainerState(running: true), ContainerState(running: false)])
+        let warnings = try await ComposeOrchestrator(engine: mock, sleep: { _ in }).up(project: proj)
+        let ops = await mock.operations
+        #expect(ops.contains("run:demo-app"))  // proceeds anyway
+        #expect(warnings.contains { $0.message.contains("cannot confirm it exited 0") })
+    }
+
     @Test("up does not wait on a dependency excluded by an inactive profile")
     func upSkipsExcludedDependencyReadiness() async throws {
         let proj = try project("""

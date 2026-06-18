@@ -186,10 +186,16 @@ public struct ComposeOrchestrator: Sendable {
         for _ in 1...maxAttempts {
             let state = try await engine.state(name: name)
             if !state.running {
-                if let code = state.exitCode, code != 0 {
+                switch state.exitCode {
+                case 0:
+                    return nil
+                case let code?:
                     return Self.dependsOnWarning(service, "Service '\(service)' exited with code \(code).")
+                case nil:
+                    // Apple `container inspect` omits the exit status, so we can't confirm success.
+                    return Self.dependsOnWarning(
+                        service, "Service '\(service)' completed, but Apple container does not report its exit status — cannot confirm it exited 0.")
                 }
-                return nil  // completed (exit status is unverifiable via `container inspect`)
             }
             try await sleep(1.0)
         }

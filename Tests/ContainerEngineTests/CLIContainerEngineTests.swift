@@ -52,10 +52,11 @@ struct CLIContainerEngineTests {
         runner.inheritExit = 3
         let engine = CLIContainerEngine(runner: runner)
 
-        await #expect(throws: EngineError(argv: ["build", "-t", "t", "."], exitCode: 3, stderr: "")) {
+        // the engine forces `--progress plain`, and the error reports the command it ran.
+        await #expect(throws: EngineError(
+            argv: ["build", "--progress", "plain", "-t", "t", "."], exitCode: 3, stderr: "")) {
             try await engine.build(argv: ["build", "-t", "t", "."])
         }
-        // the engine forces `--progress plain` after the `build` subcommand.
         #expect(runner.calls[0].arguments == ["container", "build", "--progress", "plain", "-t", "t", "."])
     }
 

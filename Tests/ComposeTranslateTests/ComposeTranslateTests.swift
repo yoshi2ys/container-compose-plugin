@@ -233,6 +233,21 @@ struct ComposeTranslateTests {
         #expect(!bare.argv.contains("HOST_GATEWAY=192.168.64.1"))
     }
 
+    @Test("an explicit HOST_GATEWAY in environment is not overridden by the injected one")
+    func hostGatewayDoesNotClobberUserValue() throws {
+        let proj = try project("""
+        services:
+          a:
+            image: x
+            environment:
+              HOST_GATEWAY: "10.0.0.9"
+        """)
+        let opts = TranslateOptions(hostGateway: "192.168.64.1")
+        let run = ComposeTranslate.runArgs(serviceName: "a", project: proj, options: opts)
+        #expect(containsSlice(run.argv, ["-e", "HOST_GATEWAY=10.0.0.9"]))     // user value kept
+        #expect(!run.argv.contains("HOST_GATEWAY=192.168.64.1"))             // injected one skipped
+    }
+
     @Test("preflight flags a bind source that is a file, not a directory")
     func preflightBindFile() throws {
         let proj = try project("""

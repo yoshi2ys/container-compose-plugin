@@ -91,7 +91,9 @@ public enum ComposeTranslate {
         for e in svc.environment.entries {
             argv += ["-e", e.value.map { "\(e.key)=\($0)" } ?? e.key]
         }
-        if let gateway = options.hostGateway {
+        // Inject the host gateway, but never override an explicit `environment:` value.
+        if let gateway = options.hostGateway,
+            !svc.environment.entries.contains(where: { $0.key == "HOST_GATEWAY" }) {
             argv += ["-e", "HOST_GATEWAY=\(gateway)"]
         }
         for file in svc.envFile {

@@ -65,7 +65,8 @@ public actor CLIContainerEngine: ContainerEngine {
         var full = argv
         full.insert(contentsOf: ["--progress", "plain"], at: 1)
         let code = try await runner.runInheritingIO(executable, prefix + full)
-        guard code == 0 else { throw EngineError(argv: argv, exitCode: code, stderr: "") }
+        // Report the command we actually ran (with `--progress plain`) so it reproduces.
+        guard code == 0 else { throw EngineError(argv: full, exitCode: code, stderr: "") }
     }
     public func createNetwork(argv: [String]) async throws { _ = try await capture(argv) }
     public func createVolume(argv: [String]) async throws { _ = try await capture(argv) }
