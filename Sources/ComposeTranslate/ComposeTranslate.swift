@@ -154,15 +154,18 @@ public enum ComposeTranslate {
     ///
     /// With `baseDirectory` set, the `context` resolves against the compose file's
     /// directory and `dockerfile` against the resolved context (Compose semantics).
+    /// `noCache` adds `--no-cache` so the builder ignores its layer cache.
     public static func buildArgs(
         serviceName: String,
         project: ComposeProject,
-        baseDirectory: String? = nil
+        baseDirectory: String? = nil,
+        noCache: Bool = false
     ) -> (argv: [String], tag: String)? {
         guard let svc = project.services[serviceName], let build = svc.build else { return nil }
         let tag = derivedTag(projectName: project.name ?? "compose", serviceName: serviceName)
         let context = resolvePath(build.context, relativeTo: baseDirectory)
         var argv = ["build", "-t", tag]
+        if noCache { argv += ["--no-cache"] }
         if let dockerfile = build.dockerfile {
             // Against the resolved context — a no-op unless `context` is absolute, i.e.
             // unless `baseDirectory` was set (`resolvePath` only resolves an absolute base).

@@ -65,9 +65,8 @@ public struct ComposeOrchestrator: Sendable {
 
         // `build:` needs the BuildKit builder up, or `container build` hangs and times
         // out; start it on demand before any build runs.
-        let needsBuild = order.contains { project.services[$0]?.build != nil }
-        if needsBuild, !(try await engine.builderRunning()) {
-            try await engine.startBuilder()
+        if order.contains(where: { project.services[$0]?.build != nil }) {
+            try await ensureBuilderRunning()
         }
 
         // Prerequisites (idempotent; "already exists" is fine to ignore).
@@ -108,6 +107,35 @@ public struct ComposeOrchestrator: Sendable {
         return warnings
     }
 
+    /// Build (or rebuild) images for services that declare a `build:` section —
+    /// the Compose `build` command. `services`, when non-empty, restricts the set to
+    /// those names (assumed to exist; the CLI validates first); profiles do not affect
+    /// `build`. With `noCache`, the builder ignores its layer cache. Returns the
+    /// service names actually built.
+    @discardableResult
+    public func build(
+        project: ComposeProject,
+        services: [String] = [],
+        noCache: Bool = false,
+        baseDirectory: String? = nil
+    ) async throws -> [String] {
+        guard try await engine.systemRunning() else { throw OrchestratorError.systemNotRunning }
+
+        // `buildArgs` is the single authority on what is buildable — it returns nil for
+        // image-only services, so `compactMap` doubles as the filter.
+        let requested = services.isEmpty ? project.serviceNames : services
+        let builds = requested.compactMap { name in
+            ComposeTranslate.buildArgs(
+                serviceName: name, project: project, baseDirectory: baseDirectory, noCache: noCache)
+                .map { (service: name, argv: $0.argv) }
+        }
+        guard !builds.isEmpty else { return [] }
+
+        try await ensureBuilderRunning()
+        for item in builds { try await engine.build(argv: item.argv) }
+        return builds.map(\.service)
+    }
+
     /// Stop and remove the stack's containers in reverse dependency order.
     /// Errors per container are ignored (already gone / never started).
     public func down(project: ComposeProject, activeProfiles: Set<String> = []) async throws {
@@ -142,6 +170,12 @@ public struct ComposeOrchestrator: Sendable {
 
     private func containerName(project: ComposeProject, service: String) -> String {
         project.services[service]?.containerName ?? "\(project.name ?? "compose")-\(service)"
+    }
+
+    /// Start the BuildKit builder if it is down — `container build` hangs and times
+    /// out without it. Idempotent (only starts when `builderRunning` reports false).
+    private func ensureBuilderRunning() async throws {
+        if !(try await engine.builderRunning()) { try await engine.startBuilder() }
     }
 
     // MARK: - readiness (depends_on conditions)

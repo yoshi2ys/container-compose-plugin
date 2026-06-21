@@ -109,6 +109,23 @@ struct ComposeTranslateTests {
         #expect(run.argv.contains("demo-api:compose"))
     }
 
+    @Test("buildArgs injects --no-cache only when requested")
+    func buildArgsNoCache() throws {
+        let proj = try project("""
+        name: demo
+        services:
+          api:
+            build:
+              context: ./api
+        """)
+        let plain = try #require(ComposeTranslate.buildArgs(serviceName: "api", project: proj))
+        #expect(!plain.argv.contains("--no-cache"))
+
+        let noCache = try #require(
+            ComposeTranslate.buildArgs(serviceName: "api", project: proj, noCache: true))
+        #expect(noCache.argv == ["build", "-t", "demo-api:compose", "--no-cache", "./api"])
+    }
+
     @Test("multi-element entrypoint folds extras into command")
     func entrypointFolding() throws {
         let proj = try project("""
