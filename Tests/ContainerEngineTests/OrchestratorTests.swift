@@ -35,7 +35,10 @@ actor MockEngine: ContainerEngine {
         operations.append("run:\(value(after: "--name", in: argv) ?? "?")")
         return "id"
     }
+    /// Full argv of every `build` call, for asserting flags like `--no-cache`.
+    var buildInvocations: [[String]] = []
     func build(argv: [String]) async throws {
+        buildInvocations.append(argv)
         operations.append("build:\(value(after: "-t", in: argv) ?? "?")")
     }
     func createNetwork(argv: [String]) async throws {
@@ -128,6 +131,81 @@ struct OrchestratorTests {
         try await ComposeOrchestrator(engine: mock).down(project: proj)
         let ops = await mock.operations
         #expect(ops == ["stop:demo-top", "rm:demo-top", "stop:demo-base", "rm:demo-base"])
+    }
+
+    @Test("build builds every service that declares a build section")
+    func buildAll() async throws {
+        let proj = try project("""
+        name: demo
+        services:
+          api:
+            build:
+              context: ./api
+          web:
+            build:
+              context: ./web
+          cache:
+            image: redis
+        """)
+        let mock = MockEngine()
+        let built = try await ComposeOrchestrator(engine: mock).build(project: proj)
+        let ops = await mock.operations
+        #expect(Set(built) == ["api", "web"])
+        #expect(ops.contains("build:demo-api:compose"))
+        #expect(ops.contains("build:demo-web:compose"))
+        #expect(!ops.contains("build:demo-cache:compose"))  // image-only service is skipped
+    }
+
+    @Test("build restricts to the named services")
+    func buildNamed() async throws {
+        let proj = try project("""
+        name: demo
+        services:
+          api:
+            build:
+              context: ./api
+          web:
+            build:
+              context: ./web
+        """)
+        let mock = MockEngine()
+        let built = try await ComposeOrchestrator(engine: mock).build(project: proj, services: ["api"])
+        let ops = await mock.operations
+        #expect(built == ["api"])
+        #expect(ops.contains("build:demo-api:compose"))
+        #expect(!ops.contains("build:demo-web:compose"))
+    }
+
+    @Test("build starts the builder when it is down")
+    func buildStartsBuilder() async throws {
+        let proj = try project("name: demo\nservices:\n  api:\n    build:\n      context: ./api\n")
+        let mock = MockEngine()
+        await mock.setBuilderUp(false)
+        try await ComposeOrchestrator(engine: mock).build(project: proj)
+        let ops = await mock.operations
+        #expect(ops.contains("builderstart"))
+        #expect(ops.contains("build:demo-api:compose"))
+    }
+
+    @Test("build --no-cache passes the flag to every build")
+    func buildNoCache() async throws {
+        let proj = try project("name: demo\nservices:\n  api:\n    build:\n      context: ./api\n")
+        let mock = MockEngine()
+        try await ComposeOrchestrator(engine: mock).build(project: proj, noCache: true)
+        let invocations = await mock.buildInvocations
+        #expect(!invocations.isEmpty)
+        #expect(invocations.allSatisfy { $0.contains("--no-cache") })
+    }
+
+    @Test("build with no buildable services does nothing and leaves the builder alone")
+    func buildNothing() async throws {
+        let proj = try project("name: demo\nservices:\n  a:\n    image: x\n")
+        let mock = MockEngine()
+        await mock.setBuilderUp(false)
+        let built = try await ComposeOrchestrator(engine: mock).build(project: proj)
+        let ops = await mock.operations
+        #expect(built.isEmpty)
+        #expect(!ops.contains("builderstart"))
     }
 
     @Test("up starts the builder when a service builds and the builder is down")

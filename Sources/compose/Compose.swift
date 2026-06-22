@@ -16,6 +16,8 @@ struct ComposeCLI {
         COMMANDS:
           up                 Create and start the stack (dependency order)
           down               Stop and remove the stack (reverse order)
+          build [service...] Build images for services with a build: section
+                             (--no-cache to ignore the builder's layer cache)
           ps                 List the stack's containers
           logs [service]     Show logs (--follow, --tail <n>)
 
@@ -23,6 +25,7 @@ struct ComposeCLI {
           -f, --file <file>  Compose file (default: ./compose.yaml, compose.yml,
                              docker-compose.yaml, docker-compose.yml)
           --profile <name>   Activate a compose profile (repeatable)
+          --no-cache         Build without the builder's layer cache (build only)
           -h, --help         Show this help
         """
 
@@ -39,6 +42,7 @@ struct ComposeCLI {
         var positional: [String] = []
         var follow = false
         var tail: Int?
+        var noCache = false
 
         var iterator = args.makeIterator()
         while let arg = iterator.next() {
@@ -47,6 +51,7 @@ struct ComposeCLI {
             case "--profile": if let value = iterator.next() { profiles.insert(value) }
             case "--follow": follow = true
             case "--tail": tail = iterator.next().flatMap(Int.init)
+            case "--no-cache": noCache = true
             default: positional.append(arg)
             }
         }
@@ -75,6 +80,21 @@ struct ComposeCLI {
                 let (project, _, _) = try loadProject(file: file)
                 try await orchestrator.down(project: project, activeProfiles: profiles)
                 print("Removed \(project.name ?? "compose").")
+            case "build":
+                let (project, warnings, baseDirectory) = try loadProject(file: file)
+                printWarnings(warnings)
+                for service in extras where project.services[service] == nil {
+                    fail("no such service: \(service)")
+                }
+                let built = try await orchestrator.build(
+                    project: project, services: extras, noCache: noCache, baseDirectory: baseDirectory)
+                if built.isEmpty {
+                    print(extras.isEmpty
+                        ? "No services with a build: section."
+                        : "No buildable services among: \(extras.joined(separator: ", ")).")
+                } else {
+                    print("Built \(built.count) image(s).")
+                }
             case "ps":
                 let code = try await orchestrator.ps()
                 exit(code)
