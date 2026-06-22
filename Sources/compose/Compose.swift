@@ -16,7 +16,7 @@ struct ComposeCLI {
         COMMANDS:
           up                 Create and start the stack (dependency order)
           down               Stop and remove the stack (reverse order)
-          build [service]    Build images for services with a build: section
+          build [service...] Build images for services with a build: section
                              (--no-cache to ignore the builder's layer cache)
           ps                 List the stack's containers
           logs [service]     Show logs (--follow, --tail <n>)
