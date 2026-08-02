@@ -33,6 +33,8 @@ public struct Warning: Sendable, Hashable {
         case engineGap(EngineGap)
         /// We worked around a limitation; the string describes how.
         case emulated(String)
+        /// A `${VAR}` reference with no value; substituted with an empty string.
+        case unsetVariable
     }
 
     public var kind: Kind

@@ -19,6 +19,8 @@ public struct CLIContext: Sendable {
     public var pathKind: @Sendable (String) -> PathKind
     public var readFile: @Sendable (String) throws -> String
     public var makeEngine: @Sendable () -> any ContainerEngine
+    /// The process environment, the first source for `${…}` interpolation.
+    public var environment: [String: String]
 
     public init(
         arguments: [String],
@@ -27,7 +29,8 @@ public struct CLIContext: Sendable {
         writeError: @escaping @Sendable (String) -> Void,
         pathKind: @escaping @Sendable (String) -> PathKind,
         readFile: @escaping @Sendable (String) throws -> String,
-        makeEngine: @escaping @Sendable () -> any ContainerEngine
+        makeEngine: @escaping @Sendable () -> any ContainerEngine,
+        environment: [String: String] = [:]
     ) {
         self.arguments = arguments
         self.currentDirectory = currentDirectory
@@ -36,6 +39,7 @@ public struct CLIContext: Sendable {
         self.pathKind = pathKind
         self.readFile = readFile
         self.makeEngine = makeEngine
+        self.environment = environment
     }
 
     /// The real process environment: `FileManager`, the standard streams, and the
@@ -53,7 +57,8 @@ public struct CLIContext: Sendable {
                 return isDirectory.boolValue ? .directory : .file
             },
             readFile: { try String(contentsOfFile: $0, encoding: .utf8) },
-            makeEngine: { CLIContainerEngine() }
+            makeEngine: { CLIContainerEngine() },
+            environment: ProcessInfo.processInfo.environment
         )
     }
 }

@@ -115,8 +115,27 @@ public enum ComposeCLI {
         // Absolute dir of the compose file; relative build/bind/env_file paths resolve
         // against this (Compose semantics), so `up` works regardless of the shell CWD.
         let directory = URL(fileURLWithPath: path).deletingLastPathComponent()
-        let result = try ComposeParser.parse(yaml, projectNameFallback: directory.lastPathComponent)
+        let dotEnv = try loadDotEnv(directory: directory.path, context: context)
+        let result = try ComposeParser.parse(
+            yaml, projectNameFallback: directory.lastPathComponent
+        ) { name in
+            // The process environment wins over `.env`, as in Compose.
+            context.environment[name] ?? dotEnv[name]
+        }
         return (result.project, result.warnings, directory.path)
+    }
+
+    /// The `.env` beside the compose file, if there is one. A file that exists but
+    /// cannot be read is an error: silently interpolating without it would start the
+    /// stack with the wrong values.
+    private static func loadDotEnv(directory: String, context: CLIContext) throws -> [String: String] {
+        let path = "\(directory)/.env"
+        guard context.pathKind(path) == .file else { return [:] }
+        do {
+            return DotEnv.parse(try context.readFile(path))
+        } catch {
+            throw CLIError("cannot read \(path): \(error)")
+        }
     }
 
     /// Preflight on bind mounts: a source that points at a file (Apple `container`

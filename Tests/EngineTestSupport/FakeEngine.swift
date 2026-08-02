@@ -25,6 +25,8 @@ public actor FakeEngine: ContainerEngine {
     public private(set) var operations: [String] = []
     /// Full argv of every `build`, for asserting flags like `--no-cache`.
     public private(set) var buildInvocations: [[String]] = []
+    /// Full argv of every `run`, for asserting translated values.
+    public private(set) var runInvocations: [[String]] = []
 
     private var running: Bool
     private var builderUp: Bool
@@ -68,6 +70,7 @@ public actor FakeEngine: ContainerEngine {
     public func run(argv: [String]) async throws -> String {
         let name = value(after: "--name", in: argv) ?? "?"
         operations.append("run:\(name)")
+        runInvocations.append(argv)
         let labels = labels(in: argv)
         containers.append(ContainerSummary(
             id: name, image: argv.last ?? "",

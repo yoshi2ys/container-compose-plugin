@@ -136,6 +136,15 @@ Apple `container` has rough edges that this plugin smooths over at `up` time:
   'broken' is not running. Check its log: container compose logs broken
   ```
   If nothing is left running, `up` exits non-zero.
+- **Variable interpolation and `.env`** — `${VAR}`, `${VAR:-default}`,
+  `${VAR-default}`, `${VAR:?error}`, `${VAR?error}`, `$VAR` and `$$` are substituted
+  throughout the file, taking values from the process environment first and then from
+  a `.env` beside the compose file. A variable with no value substitutes an empty
+  string and says so; a `:?` variable with no value stops the command and names the
+  key it came from (`services.db.environment.MYSQL_ROOT_PASSWORD`). A variable inside
+  a default (`${A:-${B}}`, `${A:-$B}`) and the `:+` modifier are not supported — both
+  are errors, never a silent substitution. The contents of an `env_file` are passed to
+  the engine as written and are not interpolated.
 - **Bind-mount preflight** — a bind `source` that points at a file (Apple `container`
   mounts directories only) is flagged before it fails cryptically.
 

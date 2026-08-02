@@ -22,6 +22,8 @@ struct CLIRun {
     let stdout: String
     let stderr: String
     let operations: [String]
+    /// Full argv of every `container run`, for asserting translated values.
+    let runInvocations: [[String]]
 }
 
 /// Runs the CLI against an in-memory filesystem (`files`: path → contents) and a
@@ -31,7 +33,8 @@ func runCLI(
     files: [String: String] = [:],
     directories: Set<String> = [],
     currentDirectory: String = "/work",
-    engine: FakeEngine = FakeEngine()
+    engine: FakeEngine = FakeEngine(),
+    environment: [String: String] = [:]
 ) async -> CLIRun {
     let sink = OutputSink()
     let context = CLIContext(
@@ -48,10 +51,11 @@ func runCLI(
             guard let contents = files[path] else { throw CLIError("unreadable: \(path)") }
             return contents
         },
-        makeEngine: { engine }
+        makeEngine: { engine },
+        environment: environment
     )
     let code = await ComposeCLI.run(context)
     return CLIRun(
         exitCode: code, stdout: sink.stdout, stderr: sink.stderr,
-        operations: await engine.operations)
+        operations: await engine.operations, runInvocations: await engine.runInvocations)
 }
