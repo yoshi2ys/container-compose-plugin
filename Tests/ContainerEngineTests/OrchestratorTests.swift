@@ -500,6 +500,42 @@ struct OrchestratorTests {
         #expect(stopped == ["demo-gone", "demo-web", "demo-db"])
     }
 
+    @Test("down orders a profile-excluded service by its dependencies, not as an afterthought")
+    func downOrdersExcludedServicesProperly() async throws {
+        let proj = try project("""
+        name: demo
+        services:
+          db:
+            image: x
+          debug:
+            image: x
+            profiles: [debug]
+            depends_on: [db]
+        """)
+        let mock = FakeEngine()
+        await mock.setContainers([
+            composeContainer(project: "demo", service: "db"),
+            composeContainer(project: "demo", service: "debug"),
+        ])
+        // No active profile, but `debug` is still a defined service that depends on
+        // `db`, so it has to be torn down first.
+        let removed = try await ComposeOrchestrator(engine: mock).down(project: proj)
+        #expect(removed == ["demo-debug", "demo-db"])
+    }
+
+    @Test("restart brings up a stack that was already stopped")
+    func restartStartsAStoppedStack() async throws {
+        let proj = try project("name: demo\nservices:\n  web:\n    image: x\n")
+        let mock = FakeEngine()
+        await mock.setContainers([
+            composeContainer(project: "demo", service: "web", state: "stopped")
+        ])
+        let restarted = try await ComposeOrchestrator(engine: mock).restart(project: proj)
+        #expect(restarted == ["demo-web"])
+        // nothing to stop, so no pointless `container stop` on a stopped container
+        #expect(await mock.operations == ["start:demo-web"])
+    }
+
     @Test("down refuses when the system is not running")
     func downSystemNotRunning() async throws {
         let proj = try project("name: demo\nservices:\n  web:\n    image: x\n")

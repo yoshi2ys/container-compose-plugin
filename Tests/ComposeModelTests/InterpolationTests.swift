@@ -231,6 +231,20 @@ struct ComposeInterpolationTests {
         }
     }
 
+    @Test("an error path names the key the file resolved to, not the template")
+    func failurePathUsesInterpolatedKeys() throws {
+        let error = #expect(throws: InterpolationFailure.self) {
+            try parse("""
+                services:
+                  ${SERVICE}:
+                    image: nginx
+                    environment:
+                      TOKEN: ${SECRET:?set it}
+                """, ["SERVICE": "web"])
+        }
+        #expect(error?.path == "services.web.environment.TOKEN")
+    }
+
     @Test("a failure inside a list reports the index")
     func failurePathInsideSequence() throws {
         let error = #expect(throws: InterpolationFailure.self) {

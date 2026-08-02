@@ -129,6 +129,29 @@ struct ChownPreflightTests {
             service: "db", source: "./data", target: target, user: nil) != nil)
     }
 
+    /// The target names a path *inside the container*, so normalizing it must never
+    /// consult the host filesystem — on macOS `/var` is a symlink, and a resolver
+    /// would turn the most common data directory into `/private/var/lib/mysql` and
+    /// stop matching.
+    @Test("normalization is lexical: it collapses separators and leaves the rest alone")
+    func normalizationIsLexical() {
+        #expect(ComposeTranslate.normalizePosixPath("/var/lib/mysql/") == "/var/lib/mysql")
+        #expect(ComposeTranslate.normalizePosixPath("//var//lib/./mysql") == "/var/lib/mysql")
+        #expect(ComposeTranslate.normalizePosixPath("/var") == "/var")
+        #expect(ComposeTranslate.normalizePosixPath("/") == "/")
+        #expect(ComposeTranslate.normalizePosixPath("data/db") == "data/db")
+        // `..` needs to know what is a symlink, so it is left as written.
+        #expect(ComposeTranslate.normalizePosixPath("/var/lib/../lib/mysql") == "/var/lib/../lib/mysql")
+    }
+
+    @Test(
+        "a root user written with stray whitespace still warns",
+        arguments: ["0 ", " 0", "root\n", " root ", "0 :0"])
+    func rootWithWhitespace(user: String) {
+        #expect(ComposeTranslate.chownWarning(
+            service: "db", source: "./data", target: "/var/lib/mysql", user: user) != nil)
+    }
+
     @Test("bitnami paths are matched with or without a trailing component")
     func bitnamiPaths() {
         for target in ["/bitnami", "/bitnami/", "/bitnami/mariadb", "/bitnami/postgresql/data"] {

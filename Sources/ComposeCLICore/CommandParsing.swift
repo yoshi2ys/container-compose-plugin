@@ -200,10 +200,12 @@ enum ParsedArguments: Equatable {
 
 /// Parses `container compose` argument vectors.
 ///
-/// The grammar is global options → subcommand → the subcommand's own options and
-/// operands, with `--` ending option parsing. Anything unrecognized, missing a
-/// value, or unacceptable to the named subcommand is an error — nothing is
-/// silently dropped.
+/// The grammar is a subcommand, its own options, and its operands, with `--`
+/// ending option parsing. The global options (`-f`/`--file`, `--profile`,
+/// `--verbose`, `-h`/`--help`) are accepted on either side of the subcommand,
+/// since they are unambiguous wherever they appear. Anything unrecognized,
+/// missing a value, or unacceptable to the named subcommand is an error —
+/// nothing is silently dropped.
 enum CommandLineParser {
 
     static func parse(_ arguments: [String]) -> ParsedArguments {

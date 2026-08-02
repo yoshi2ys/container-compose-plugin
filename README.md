@@ -55,7 +55,7 @@ container compose --help
 ```
 container compose [-f <file>] [--profile <name>]... <command> [args]
 
-COMMANDS
+COMMANDS:
   up [-d]                  Create and start the stack, then follow its logs
   down                     Stop and remove the stack (reverse order)
   start                    Start the stack's stopped containers
@@ -68,7 +68,7 @@ COMMANDS
   exec <service> <cmd>...  Run a command in a service's container
   config                   Print the compose file with variables substituted
 
-OPTIONS
+OPTIONS:
   -f, --file <file>   Compose file (default: ./compose.yaml, compose.yml,
                       docker-compose.yaml, docker-compose.yml)
   --profile <name>    Activate a compose profile (repeatable)

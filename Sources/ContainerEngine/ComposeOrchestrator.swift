@@ -213,22 +213,28 @@ public struct ComposeOrchestrator: Sendable {
     /// started).
     ///
     /// The set comes from labels, not from names: renaming a service in the compose
-    /// file would otherwise strand the container started under the old name.
-    /// Containers whose service is no longer defined are removed last, after the
-    /// ones the file still describes.
+    /// file would otherwise strand the container started under the old name. A
+    /// container whose service is no longer in the file is removed *first*, since
+    /// nothing the file describes depends on it while it may depend on them.
+    ///
+    /// Profiles do not narrow this: `down` removes the whole project, so it takes no
+    /// profile set — passing one would suggest otherwise.
     @discardableResult
-    public func down(project: ComposeProject, activeProfiles: Set<String> = []) async throws -> [String] {
+    public func down(project: ComposeProject) async throws -> [String] {
         guard try await engine.systemRunning() else { throw OrchestratorError.systemNotRunning }
 
+        // Every defined service takes part in the ordering, profile-excluded ones
+        // included: they still own containers this removes, and ordering them as an
+        // afterthought would drop them out of the dependency order.
         let order: [String]
-        switch ComposeGraph.startupPlan(project, activeProfiles: activeProfiles) {
+        switch ComposeGraph.startupPlan(project, activeProfiles: []) {
         case .success(let plan): order = plan.shutdownOrder
         case .failure: order = project.serviceNames.reversed()
         }
 
-        // Everything else the project owns — a service excluded by a profile, or one
-        // renamed away — is still ours to remove. It goes first on this reverse pass,
-        // since it may depend on a service the file still describes.
+        // What is left carries our label but matches no service in the file — a
+        // renamed or deleted one. It goes first on this reverse pass, since it may
+        // depend on a service the file still describes.
         let (ordered, rest) = try await partition(project: project, services: order)
         let names = (rest + ordered).map(\.id)
 
@@ -288,21 +294,22 @@ public struct ComposeOrchestrator: Sendable {
     /// starting in dependency order, so a restart never leaves a dependent running
     /// without its dependency.
     ///
-    /// Everything it stops, it starts again: a container excluded by a profile is
-    /// still put back the way it was found.
+    /// Ends with every container the project owns running, profiles included — the
+    /// same contract as `docker compose restart`, which also starts a container that
+    /// was already stopped. Only the running ones are stopped first; the rest have
+    /// nothing to stop.
     @discardableResult
     public func restart(project: ComposeProject, activeProfiles: Set<String> = []) async throws -> [String] {
-        let stopped = try await apply(
+        _ = try await apply(
             project: project, activeProfiles: activeProfiles, reversed: true, scope: .everythingOwned
         ) { container in
+            guard container.isRunning else { return false }
             try await engine.stop(name: container.id, timeout: nil)
             return true
         }
-        let toStart = Set(stopped)
         return try await apply(
             project: project, activeProfiles: activeProfiles, reversed: false, scope: .everythingOwned
         ) { container in
-            guard toStart.contains(container.id) else { return false }
             try await engine.start(name: container.id)
             return true
         }
@@ -344,8 +351,12 @@ public struct ComposeOrchestrator: Sendable {
     }
 
     /// Applies `action` to the project's containers in dependency order (or its
-    /// reverse), returning the names it acted on. Containers for services no longer
-    /// in the file come last, as in `down`.
+    /// reverse), returning the names it acted on.
+    ///
+    /// Containers outside `scope` — a service gone from the file, and under
+    /// `.activeProfiles` also one the profiles exclude — are unwound first and built
+    /// up last: nothing in the file depends on them, but they may depend on
+    /// something that is in it.
     /// Which of the project's containers a lifecycle command acts on.
     enum Scope {
         /// Only the services the active profiles include, plus containers whose
