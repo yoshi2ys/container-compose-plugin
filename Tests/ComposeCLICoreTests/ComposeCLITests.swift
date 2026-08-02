@@ -1,4 +1,5 @@
 import ContainerEngine
+import EngineTestSupport
 import Testing
 
 @testable import ComposeCLICore
@@ -118,7 +119,7 @@ struct ComposeCLITests {
 
     @Test("up refuses to destroy a container owned by another project")
     func upForeignContainerConflict() async {
-        let engine = RecordingEngine(containers: [
+        let engine = FakeEngine(containers: [
             composeContainer(project: "other", service: "www", name: "demo-web")
         ])
         let run = await runCLI(["up"], files: Self.files, engine: engine)
@@ -129,7 +130,7 @@ struct ComposeCLITests {
 
     @Test("up refuses to destroy a container that carries no compose labels")
     func upUnlabelledContainerConflict() async {
-        let engine = RecordingEngine(containers: [
+        let engine = FakeEngine(containers: [
             ContainerSummary(id: "demo-web", image: "nginx", state: "running")
         ])
         let run = await runCLI(["up"], files: Self.files, engine: engine)
@@ -140,7 +141,7 @@ struct ComposeCLITests {
 
     @Test("up recreates the project's own containers without complaint")
     func upRecreatesOwnContainers() async {
-        let engine = RecordingEngine(containers: [
+        let engine = FakeEngine(containers: [
             composeContainer(project: "demo", service: "web")
         ])
         let run = await runCLI(["up"], files: Self.files, engine: engine)
@@ -150,7 +151,7 @@ struct ComposeCLITests {
 
     @Test("up reports a service that started and died, and where to look")
     func upReportsExitedService() async {
-        let run = await runCLI(["up"], files: Self.files, engine: RecordingEngine(exiting: ["worker"]))
+        let run = await runCLI(["up"], files: Self.files, engine: FakeEngine(exiting: ["worker"]))
         #expect(run.exitCode == 0)  // one service is still up
         #expect(run.stdout.contains("Started 1/2 service(s)."))
         #expect(run.stdout.contains("'worker' is not running. Check its log: container compose logs worker"))
@@ -159,14 +160,14 @@ struct ComposeCLITests {
     @Test("up fails when every service died")
     func upAllServicesDied() async {
         let run = await runCLI(
-            ["up"], files: Self.files, engine: RecordingEngine(exiting: ["web", "worker"]))
+            ["up"], files: Self.files, engine: FakeEngine(exiting: ["web", "worker"]))
         #expect(run.exitCode == 1)
         #expect(run.stdout.contains("Started 0/2 service(s)."))
     }
 
     @Test("up reports a stopped container system without touching containers")
     func upSystemDown() async {
-        let run = await runCLI(["up"], files: Self.files, engine: RecordingEngine(running: false))
+        let run = await runCLI(["up"], files: Self.files, engine: FakeEngine(running: false))
         #expect(run.exitCode == 1)
         #expect(run.stderr.contains("container system is not running"))
         #expect(run.operations.isEmpty)
@@ -243,7 +244,7 @@ struct ComposeCLITests {
 
     @Test("down removes the project's containers in reverse order and counts them")
     func downRemoves() async {
-        let engine = RecordingEngine(containers: [
+        let engine = FakeEngine(containers: [
             composeContainer(project: "demo", service: "web"),
             composeContainer(project: "demo", service: "worker"),
             composeContainer(project: "other", service: "web", name: "other-web"),
@@ -264,7 +265,7 @@ struct ComposeCLITests {
 
     @Test("ps prints only the project's containers, as a table")
     func psTable() async {
-        let engine = RecordingEngine(containers: [
+        let engine = FakeEngine(containers: [
             composeContainer(
                 project: "demo", service: "web", image: "nginx",
                 ports: [PublishedPort(hostAddress: "0.0.0.0", hostPort: 8080, containerPort: 80, proto: "tcp")]),

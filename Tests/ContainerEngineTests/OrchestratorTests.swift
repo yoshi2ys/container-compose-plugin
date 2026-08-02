@@ -1,101 +1,8 @@
 import ComposeModel
-import ComposeTranslate
+import EngineTestSupport
 import Testing
 
 @testable import ContainerEngine
-
-/// A compose-labelled container, as the engine would report it.
-func composeContainer(
-    project: String, service: String, name: String? = nil,
-    state: String = "running", image: String = "x", ports: [PublishedPort] = []
-) -> ContainerSummary {
-    ContainerSummary(
-        id: name ?? "\(project)-\(service)", image: image, state: state,
-        labels: [ComposeLabels.project: project, ComposeLabels.service: service],
-        ports: ports)
-}
-
-/// Records the sequence of engine operations so tests can assert ordering, and
-/// keeps a container store so label-based lookups (`ps`, `down`, the recreate
-/// guard, `up`'s post-start check) see a plausible engine state.
-actor MockEngine: ContainerEngine {
-    var operations: [String] = []
-    var running = true
-    var builderUp = true
-    var containers: [ContainerSummary] = []
-    /// Services whose container registers as stopped rather than running.
-    var exiting: Set<String> = []
-
-    func setRunning(_ value: Bool) { running = value }
-    func setBuilderUp(_ value: Bool) { builderUp = value }
-    func setContainers(_ value: [ContainerSummary]) { containers = value }
-    func setExiting(_ value: Set<String>) { exiting = value }
-
-    /// Not recorded in `operations`: it is a read, and every command issues it.
-    func listContainers() async throws -> [ContainerSummary] { containers }
-
-    /// Consumed per `exec`/`state` call; empty falls back to success/stopped.
-    var execResults: [Int32] = []
-    var states: [ContainerState] = []
-    func setExecResults(_ value: [Int32]) { execResults = value }
-    func setStates(_ value: [ContainerState]) { states = value }
-
-    func systemRunning() async throws -> Bool { running }
-    func builderRunning() async throws -> Bool { builderUp }
-    func startBuilder() async throws { operations.append("builderstart") }
-    func hostGateway() async throws -> String? { nil }
-
-    func exec(name: String, argv: [String]) async throws -> Int32 {
-        operations.append("exec:\(name)")
-        return execResults.isEmpty ? 0 : execResults.removeFirst()
-    }
-    func state(name: String) async throws -> ContainerState {
-        operations.append("state:\(name)")
-        return states.isEmpty ? ContainerState(running: false) : states.removeFirst()
-    }
-
-    func run(argv: [String]) async throws -> String {
-        let name = value(after: "--name", in: argv) ?? "?"
-        operations.append("run:\(name)")
-        var labels: [String: String] = [:]
-        for (index, argument) in argv.enumerated() where argument == "--label" && index + 1 < argv.count {
-            let pair = argv[index + 1]
-            guard let separator = pair.firstIndex(of: "=") else { continue }
-            labels[String(pair[..<separator])] = String(pair[pair.index(after: separator)...])
-        }
-        let service = labels[ComposeLabels.service] ?? ""
-        containers.append(ContainerSummary(
-            id: name, image: argv.last ?? "",
-            state: exiting.contains(service) ? "stopped" : "running", labels: labels))
-        return "id"
-    }
-    /// Full argv of every `build` call, for asserting flags like `--no-cache`.
-    var buildInvocations: [[String]] = []
-    func build(argv: [String]) async throws {
-        buildInvocations.append(argv)
-        operations.append("build:\(value(after: "-t", in: argv) ?? "?")")
-    }
-    func createNetwork(argv: [String]) async throws {
-        operations.append("net:\(argv.count > 2 ? argv[2] : "?")")
-    }
-    func createVolume(argv: [String]) async throws {
-        operations.append("vol:\(argv.count > 2 ? argv[2] : "?")")
-    }
-    func stop(name: String, timeout: Int?) async throws { operations.append("stop:\(name)") }
-    func remove(name: String, force: Bool) async throws {
-        operations.append("rm:\(name)")
-        containers.removeAll { $0.id == name }
-    }
-    func forward(argv: [String]) async throws -> Int32 {
-        operations.append("forward:\(argv.joined(separator: " "))")
-        return 0
-    }
-
-    private func value(after flag: String, in argv: [String]) -> String? {
-        guard let index = argv.firstIndex(of: flag), index + 1 < argv.count else { return nil }
-        return argv[index + 1]
-    }
-}
 
 @Suite("Orchestrator")
 struct OrchestratorTests {
@@ -121,7 +28,7 @@ struct OrchestratorTests {
             image: x
             depends_on: [left, right]
         """)
-        let mock = MockEngine()
+        let mock = FakeEngine()
         try await ComposeOrchestrator(engine: mock).up(project: proj)
         let ops = await mock.operations
         // nothing exists yet, so nothing is removed: services start in wave order.
@@ -131,7 +38,7 @@ struct OrchestratorTests {
     @Test("up recreates the containers it already owns, remove before run")
     func upRecreatesExisting() async throws {
         let proj = try project("name: demo\nservices:\n  web:\n    image: x\n")
-        let mock = MockEngine()
+        let mock = FakeEngine()
         await mock.setContainers([composeContainer(project: "demo", service: "web")])
         try await ComposeOrchestrator(engine: mock).up(project: proj)
         #expect(await mock.operations == ["rm:demo-web", "run:demo-web"])
@@ -146,7 +53,7 @@ struct OrchestratorTests {
             image: x
             container_name: web-v2
         """)
-        let mock = MockEngine()
+        let mock = FakeEngine()
         // started before container_name was set: same labels, different name. Removing
         // only `web-v2` would leave two containers answering for one service.
         await mock.setContainers([composeContainer(project: "demo", service: "web", name: "web-v1")])
@@ -167,7 +74,7 @@ struct OrchestratorTests {
               seed:
                 condition: service_completed_successfully
         """)
-        let mock = MockEngine()
+        let mock = FakeEngine()
         await mock.setExiting(["seed"])
         await mock.setStates([ContainerState(running: false, exitCode: 0)])
         let result = try await ComposeOrchestrator(engine: mock, sleep: { _ in }).up(project: proj)
@@ -190,7 +97,7 @@ struct OrchestratorTests {
         volumes:
           dbdata:
         """)
-        let mock = MockEngine()
+        let mock = FakeEngine()
         try await ComposeOrchestrator(engine: mock).up(project: proj)
         let ops = await mock.operations
         #expect(ops == ["net:backend", "vol:dbdata", "run:demo-db"])
@@ -207,7 +114,7 @@ struct OrchestratorTests {
             image: x
             depends_on: [base]
         """)
-        let mock = MockEngine()
+        let mock = FakeEngine()
         await mock.setContainers([
             composeContainer(project: "demo", service: "base"),
             composeContainer(project: "demo", service: "top"),
@@ -231,7 +138,7 @@ struct OrchestratorTests {
           cache:
             image: redis
         """)
-        let mock = MockEngine()
+        let mock = FakeEngine()
         let built = try await ComposeOrchestrator(engine: mock).build(project: proj)
         let ops = await mock.operations
         #expect(Set(built) == ["api", "web"])
@@ -252,7 +159,7 @@ struct OrchestratorTests {
             build:
               context: ./web
         """)
-        let mock = MockEngine()
+        let mock = FakeEngine()
         let built = try await ComposeOrchestrator(engine: mock).build(project: proj, services: ["api"])
         let ops = await mock.operations
         #expect(built == ["api"])
@@ -263,7 +170,7 @@ struct OrchestratorTests {
     @Test("build starts the builder when it is down")
     func buildStartsBuilder() async throws {
         let proj = try project("name: demo\nservices:\n  api:\n    build:\n      context: ./api\n")
-        let mock = MockEngine()
+        let mock = FakeEngine()
         await mock.setBuilderUp(false)
         try await ComposeOrchestrator(engine: mock).build(project: proj)
         let ops = await mock.operations
@@ -274,7 +181,7 @@ struct OrchestratorTests {
     @Test("build --no-cache passes the flag to every build")
     func buildNoCache() async throws {
         let proj = try project("name: demo\nservices:\n  api:\n    build:\n      context: ./api\n")
-        let mock = MockEngine()
+        let mock = FakeEngine()
         try await ComposeOrchestrator(engine: mock).build(project: proj, noCache: true)
         let invocations = await mock.buildInvocations
         #expect(!invocations.isEmpty)
@@ -284,7 +191,7 @@ struct OrchestratorTests {
     @Test("build with no buildable services does nothing and leaves the builder alone")
     func buildNothing() async throws {
         let proj = try project("name: demo\nservices:\n  a:\n    image: x\n")
-        let mock = MockEngine()
+        let mock = FakeEngine()
         await mock.setBuilderUp(false)
         let built = try await ComposeOrchestrator(engine: mock).build(project: proj)
         let ops = await mock.operations
@@ -301,7 +208,7 @@ struct OrchestratorTests {
             build:
               context: ./api
         """)
-        let mock = MockEngine()
+        let mock = FakeEngine()
         await mock.setBuilderUp(false)
         try await ComposeOrchestrator(engine: mock).up(project: proj)
         let ops = await mock.operations
@@ -312,7 +219,7 @@ struct OrchestratorTests {
     @Test("up leaves the builder alone when nothing builds")
     func upNoBuilderWhenNoBuild() async throws {
         let proj = try project("name: demo\nservices:\n  a:\n    image: x\n")
-        let mock = MockEngine()
+        let mock = FakeEngine()
         await mock.setBuilderUp(false)
         try await ComposeOrchestrator(engine: mock).up(project: proj)
         let ops = await mock.operations
@@ -336,7 +243,7 @@ struct OrchestratorTests {
               db:
                 condition: service_healthy
         """)
-        let mock = MockEngine()
+        let mock = FakeEngine()
         await mock.setExecResults([1, 0])  // unhealthy once, then healthy
         try await ComposeOrchestrator(engine: mock, sleep: { _ in }).up(project: proj)
         let ops = await mock.operations
@@ -363,7 +270,7 @@ struct OrchestratorTests {
               db:
                 condition: service_healthy
         """)
-        let mock = MockEngine()
+        let mock = FakeEngine()
         await mock.setExecResults([1, 1, 1, 1])  // always failing
         let warnings = try await ComposeOrchestrator(engine: mock, sleep: { _ in }).up(project: proj).warnings
         let ops = await mock.operations
@@ -385,7 +292,7 @@ struct OrchestratorTests {
               seed:
                 condition: service_completed_successfully
         """)
-        let mock = MockEngine()
+        let mock = FakeEngine()
         await mock.setStates([ContainerState(running: true), ContainerState(running: false, exitCode: 0)])
         try await ComposeOrchestrator(engine: mock, sleep: { _ in }).up(project: proj)
         let ops = await mock.operations
@@ -408,7 +315,7 @@ struct OrchestratorTests {
               seed:
                 condition: service_completed_successfully
         """)
-        let mock = MockEngine()
+        let mock = FakeEngine()
         // stops with no exit code (the real Apple container case)
         await mock.setStates([ContainerState(running: true), ContainerState(running: false)])
         let warnings = try await ComposeOrchestrator(engine: mock, sleep: { _ in }).up(project: proj).warnings
@@ -433,7 +340,7 @@ struct OrchestratorTests {
               db:
                 condition: service_healthy
         """)
-        let mock = MockEngine()
+        let mock = FakeEngine()
         await mock.setExecResults([1, 1, 1])  // would burn the budget if db were polled
         // no active profiles → db is excluded from the plan
         try await ComposeOrchestrator(engine: mock, sleep: { _ in }).up(project: proj)
@@ -458,7 +365,7 @@ struct OrchestratorTests {
     @Test("up refuses when the system is not running, touching nothing")
     func upSystemNotRunning() async throws {
         let proj = try project("services:\n  a:\n    image: x\n")
-        let mock = MockEngine()
+        let mock = FakeEngine()
         await mock.setRunning(false)
         await #expect(throws: OrchestratorError.self) {
             try await ComposeOrchestrator(engine: mock).up(project: proj)
@@ -472,7 +379,7 @@ struct OrchestratorTests {
     @Test("down removes a container whose service was renamed in the compose file")
     func downRemovesRenamedService() async throws {
         let proj = try project("name: demo\nservices:\n  api:\n    image: x\n")
-        let mock = MockEngine()
+        let mock = FakeEngine()
         await mock.setContainers([
             composeContainer(project: "demo", service: "api"),
             // started before the service was renamed api → its container is stranded
@@ -487,7 +394,7 @@ struct OrchestratorTests {
     @Test("down leaves other projects and unlabelled containers alone")
     func downIgnoresForeignContainers() async throws {
         let proj = try project("name: demo\nservices:\n  web:\n    image: x\n")
-        let mock = MockEngine()
+        let mock = FakeEngine()
         await mock.setContainers([
             composeContainer(project: "demo", service: "web"),
             composeContainer(project: "other", service: "web", name: "other-web"),
@@ -500,7 +407,7 @@ struct OrchestratorTests {
     @Test("down refuses when the system is not running")
     func downSystemNotRunning() async throws {
         let proj = try project("name: demo\nservices:\n  web:\n    image: x\n")
-        let mock = MockEngine()
+        let mock = FakeEngine()
         await mock.setRunning(false)
         await #expect(throws: OrchestratorError.self) {
             try await ComposeOrchestrator(engine: mock).down(project: proj)
@@ -511,7 +418,7 @@ struct OrchestratorTests {
     @Test("ps lists only this project, defined services first")
     func psFiltersByProject() async throws {
         let proj = try project("name: demo\nservices:\n  web:\n    image: x\n  db:\n    image: y\n")
-        let mock = MockEngine()
+        let mock = FakeEngine()
         await mock.setContainers([
             composeContainer(project: "demo", service: "web"),
             composeContainer(project: "demo", service: "gone"),
@@ -550,7 +457,7 @@ struct OrchestratorTests {
     @Test("up stops before mutating anything when a name is taken")
     func upConflictStartsNothing() async throws {
         let proj = try project("name: demo\nservices:\n  web:\n    image: x\n")
-        let mock = MockEngine()
+        let mock = FakeEngine()
         await mock.setContainers([composeContainer(project: "other", service: "www", name: "demo-web")])
         await #expect(throws: OrchestratorError.self) {
             try await ComposeOrchestrator(engine: mock).up(project: proj)
@@ -561,7 +468,7 @@ struct OrchestratorTests {
     @Test("up reports which services are running once the last wave finishes")
     func upReportsSettledState() async throws {
         let proj = try project("name: demo\nservices:\n  web:\n    image: x\n  seed:\n    image: y\n")
-        let mock = MockEngine()
+        let mock = FakeEngine()
         await mock.setExiting(["seed"])
         let result = try await ComposeOrchestrator(engine: mock).up(project: proj)
         #expect(result.running == ["web"])
@@ -589,7 +496,7 @@ struct OrchestratorTests {
     @Test("logs addresses the container the labels point at, not the derived name")
     func logsUsesResolvedName() async throws {
         let proj = try project("name: demo\nservices:\n  web:\n    image: x\n")
-        let mock = MockEngine()
+        let mock = FakeEngine()
         await mock.setContainers([
             composeContainer(project: "demo", service: "web", name: "renamed-web")
         ])
@@ -609,7 +516,7 @@ struct OrchestratorTests {
             environment:
               X: "1"
         """)
-        let mock = MockEngine()
+        let mock = FakeEngine()
         await #expect(throws: OrchestratorError.self) {
             try await ComposeOrchestrator(engine: mock).up(project: proj)
         }

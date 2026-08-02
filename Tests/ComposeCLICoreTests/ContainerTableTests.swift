@@ -1,4 +1,5 @@
 import ContainerEngine
+import EngineTestSupport
 import Testing
 
 @testable import ComposeCLICore
