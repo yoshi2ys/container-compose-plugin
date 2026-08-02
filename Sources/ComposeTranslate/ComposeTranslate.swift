@@ -6,6 +6,9 @@ import Foundation
 public enum ComposeLabels {
     public static let project = "com.composeforcontainer.project"
     public static let service = "com.composeforcontainer.service"
+    /// Fingerprint of the configuration the container was created from, so `up` can
+    /// tell an unchanged service from one that needs recreating. See `ComposeHash`.
+    public static let configHash = "com.composeforcontainer.config-hash"
 }
 
 public struct TranslateOptions: Sendable {
@@ -24,6 +27,10 @@ public struct TranslateOptions: Sendable {
     /// The domain container names are qualified with, e.g. `demo.test`. `nil` leaves
     /// names unqualified and no `--dns-search` added.
     public var dnsDomain: String?
+    /// Fingerprint to stamp on the container. Set on the second translation: the
+    /// first produces the argv the hash is taken from. `ComposeHash.normalize`
+    /// removes this label again, so hashing either argv gives the same answer.
+    public var configHash: String?
 
     public init(
         detach: Bool = true,
@@ -31,7 +38,8 @@ public struct TranslateOptions: Sendable {
         cidfilePath: String? = nil,
         baseDirectory: String? = nil,
         hostGateway: String? = nil,
-        dnsDomain: String? = nil
+        dnsDomain: String? = nil,
+        configHash: String? = nil
     ) {
         self.detach = detach
         self.removeOnExit = removeOnExit
@@ -39,6 +47,7 @@ public struct TranslateOptions: Sendable {
         self.baseDirectory = baseDirectory
         self.hostGateway = hostGateway
         self.dnsDomain = dnsDomain
+        self.configHash = configHash
     }
 }
 
@@ -53,9 +62,15 @@ public enum PathKind: Sendable, Equatable {
 public struct TranslationResult: Sendable, Equatable {
     public var argv: [String]
     public var warnings: [Warning]
-    public init(argv: [String], warnings: [Warning]) {
+    /// Index in `argv` where the positionals begin — the image, then the command.
+    /// Everything before it is options; everything from it on belongs to the
+    /// container's own process and must be read as opaque.
+    public var positionalIndex: Int
+
+    public init(argv: [String], warnings: [Warning], positionalIndex: Int = 0) {
         self.argv = argv
         self.warnings = warnings
+        self.positionalIndex = positionalIndex
     }
 }
 
@@ -95,6 +110,9 @@ public enum ComposeTranslate {
 
         argv += ["--label", "\(ComposeLabels.project)=\(projectName)"]
         argv += ["--label", "\(ComposeLabels.service)=\(serviceName)"]
+        if let hash = options.configHash {
+            argv += ["--label", "\(ComposeLabels.configHash)=\(hash)"]
+        }
         for label in svc.labels { argv += ["--label", "\(label.key)=\(label.value)"] }
 
         for e in svc.environment.entries {
@@ -148,6 +166,7 @@ public enum ComposeTranslate {
         let entrypointExtras = appendEntrypoint(svc, serviceName: serviceName, into: &argv, warnings: &warnings)
 
         // image (positional) then command (positional).
+        let positionalIndex = argv.count
         if let image = svc.image {
             argv += [image]
         } else if svc.build != nil {
@@ -160,7 +179,7 @@ public enum ComposeTranslate {
         }
 
         argv += entrypointExtras + commandArguments(svc.command)
-        return TranslationResult(argv: argv, warnings: warnings)
+        return TranslationResult(argv: argv, warnings: warnings, positionalIndex: positionalIndex)
     }
 
     // MARK: build

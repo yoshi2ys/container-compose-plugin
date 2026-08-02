@@ -57,6 +57,7 @@ container compose [-f <file>] [--profile <name>]... <command> [args]
 
 COMMANDS:
   up [-d]                  Create and start the stack, then follow its logs
+                           (--force-recreate, --no-cache)
   down                     Stop and remove the stack (reverse order)
   start                    Start the stack's stopped containers
   stop                     Stop the containers without removing them
@@ -154,8 +155,18 @@ Apple `container` has rough edges that this plugin smooths over at `up` time:
 - **`depends_on: service_healthy` / `service_completed_successfully`** — emulated by
   polling the dependency's `healthcheck` (via `container exec`) or its run state
   before starting dependents. Bounded by the healthcheck's retries/interval.
-- **Idempotent `up`** — each container is recreated (stale one removed first), so a
-  re-run recovers cleanly from a partial start. Named volumes persist.
+- **`up` recreates only what changed** — every container is stamped with a
+  fingerprint of the arguments it was created from plus the id of the image it runs.
+  A re-run leaves a service whose configuration and image are unchanged exactly as it
+  is, so long-running services are not restarted for nothing and anything written
+  outside a volume survives:
+  ```
+  Started 2 service(s). 2 unchanged (web,worker).
+  ```
+  Edit the compose file, pull a newer image behind the same tag, or change a
+  Dockerfile, and that service alone is recreated. `--force-recreate` recreates
+  everything; a service that is unchanged but stopped is started rather than
+  recreated. Named volumes persist either way.
 - **Labels identify the stack, not names** — every container carries
   `com.composeforcontainer.project` / `.service`, and `ps` / `down` / `logs` look it
   up by label. So `ps` shows your stack alone (no `buildkit`, no other projects), and

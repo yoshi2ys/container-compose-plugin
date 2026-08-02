@@ -122,6 +122,9 @@ public protocol ContainerEngine: Sendable {
     /// Local DNS domains registered with `container system dns create`. A container
     /// named `<label>.<domain>` is registered in the engine's resolver.
     func dnsDomains() async throws -> [String]
+    /// The id of the image `ref` currently resolves to, or `nil` when it is not
+    /// present locally. Changes when the image behind a tag changes.
+    func imageDigest(ref: String) async throws -> String?
     /// Stream a container's log lines as they arrive.
     ///
     /// `nonisolated` in the CLI implementation on purpose: a followed log lives as

@@ -68,7 +68,7 @@ public enum ComposeCLI {
         case .up where !invocation.detach:
             return try await foregroundUp(
                 project: loaded.project, baseDirectory: loaded.baseDirectory, profiles: profiles,
-                orchestrator: orchestrator, context: context, verbose: invocation.verbose)
+                orchestrator: orchestrator, context: context, invocation: invocation)
 
         case .up:
             let included = ComposeGraph.includedServices(loaded.project, activeProfiles: profiles)
@@ -79,7 +79,8 @@ public enum ComposeCLI {
                 context, verbose: invocation.verbose)
             let options = TranslateOptions(baseDirectory: loaded.baseDirectory)
             let result = try await orchestrator.up(
-                project: loaded.project, activeProfiles: profiles, options: options)
+                project: loaded.project, activeProfiles: profiles, options: options,
+                forceRecreate: invocation.forceRecreate, noCache: invocation.noCache)
             printWarnings(result.warnings, context, verbose: invocation.verbose)
             return report(result, context)
 
@@ -236,8 +237,9 @@ public enum ComposeCLI {
     /// still running.
     private static func foregroundUp(
         project: ComposeProject, baseDirectory: String, profiles: Set<String>,
-        orchestrator: ComposeOrchestrator, context: CLIContext, verbose: Bool
+        orchestrator: ComposeOrchestrator, context: CLIContext, invocation: Invocation
     ) async throws -> Int32 {
+        let verbose = invocation.verbose
         let printer = multiplexer(for: project, profiles: profiles, context: context)
         let outcome = Box<Result<UpResult, Error>>()
         let startCode = Box<Int32>()
@@ -246,15 +248,19 @@ public enum ComposeCLI {
             do {
                 let result = try await orchestrator.up(
                     project: project, activeProfiles: profiles,
-                    options: TranslateOptions(baseDirectory: baseDirectory))
+                    options: TranslateOptions(baseDirectory: baseDirectory),
+                    forceRecreate: invocation.forceRecreate, noCache: invocation.noCache)
                 outcome.value = .success(result)
                 // Reported here rather than after the follow, so the summary reaches
                 // the terminal before the logs it summarizes.
                 printWarnings(result.warnings, context, verbose: verbose)
                 startCode.value = report(result, context)
                 guard !result.running.isEmpty else { return }
+                // A container this run created has no history to replay. One it left
+                // alone may have a day of it, so bound the catch-up in that case.
                 try await orchestrator.follow(
-                    project: project, activeProfiles: profiles
+                    project: project, activeProfiles: profiles,
+                    tail: result.unchanged.isEmpty ? nil : 100
                 ) { service, line in
                     printer.line(service, line)
                 }
@@ -410,12 +416,17 @@ public enum ComposeCLI {
     /// failure, however cleanly each `container run` returned. Services that were
     /// meant to exit (one-shot jobs) count as started, not as casualties.
     private static func report(_ result: UpResult, _ context: CLIContext) -> Int32 {
+        // Worth saying: it explains why a service did not restart, and why anything
+        // it had written outside a volume is still there.
+        let unchanged = result.unchanged.isEmpty
+            ? ""
+            : " \(result.unchanged.count) unchanged (\(result.unchanged.joined(separator: ",")))."
         guard !result.stopped.isEmpty else {
-            context.write("Started \(result.total) service(s).\n")
+            context.write("Started \(result.total) service(s).\(unchanged)\n")
             return 0
         }
         let alive = result.running.count + result.completed.count
-        context.write("Started \(alive)/\(result.total) service(s).\n")
+        context.write("Started \(alive)/\(result.total) service(s).\(unchanged)\n")
         for service in result.stopped {
             context.write("'\(service)' is not running. Check its log: container compose logs \(service)\n")
         }

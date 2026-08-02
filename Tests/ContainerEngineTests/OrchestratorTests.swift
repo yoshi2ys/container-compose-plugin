@@ -1,4 +1,5 @@
 import ComposeModel
+import ComposeTranslate
 import EngineTestSupport
 import Testing
 
@@ -372,6 +373,156 @@ struct OrchestratorTests {
         }
         let ops = await mock.operations
         #expect(ops.isEmpty)
+    }
+
+    // MARK: - config hash
+
+    private func hashProject(_ image: String = "x") throws -> ComposeProject {
+        try project("name: demo\nservices:\n  web:\n    image: \(image)\n")
+    }
+
+    /// The container this project would have created for `web` on a previous `up`.
+    private func stamped(_ mock: FakeEngine, project: ComposeProject, state: String = "running") async throws {
+        try await ComposeOrchestrator(engine: mock).up(project: project)
+        let created = try #require(await mock.listContainers().first { $0.composeService == "web" })
+        await mock.setContainers([ContainerSummary(
+            id: created.id, image: created.image, state: state,
+            labels: created.labels, ports: created.ports)])
+        await mock.clearOperations()
+    }
+
+    @Test("an unchanged service is left running rather than recreated")
+    func unchangedServiceIsLeftAlone() async throws {
+        let proj = try hashProject()
+        let mock = FakeEngine(imageDigests: ["x": "sha256:aaa"])
+        try await stamped(mock, project: proj)
+
+        let result = try await ComposeOrchestrator(engine: mock).up(project: proj)
+        #expect(result.unchanged == ["web"])
+        // Nothing was removed and nothing re-run: whatever it wrote is still there.
+        #expect(await mock.operations.isEmpty)
+    }
+
+    @Test("an unchanged service that is stopped is started, not recreated")
+    func unchangedButStoppedIsStarted() async throws {
+        let proj = try hashProject()
+        let mock = FakeEngine(imageDigests: ["x": "sha256:aaa"])
+        try await stamped(mock, project: proj, state: "stopped")
+
+        _ = try await ComposeOrchestrator(engine: mock).up(project: proj)
+        #expect(await mock.operations == ["start:demo-web"])
+    }
+
+    @Test("a changed compose file recreates")
+    func changedConfigurationRecreates() async throws {
+        let mock = FakeEngine(imageDigests: ["x": "sha256:aaa"])
+        try await stamped(mock, project: try hashProject())
+
+        let edited = try project("""
+        name: demo
+        services:
+          web:
+            image: x
+            environment:
+              ADDED: "1"
+        """)
+        let result = try await ComposeOrchestrator(engine: mock).up(project: edited)
+        #expect(result.unchanged.isEmpty)
+        #expect(await mock.operations == ["rm:demo-web", "run:demo-web"])
+    }
+
+    /// The point of hashing the image and not just the arguments.
+    @Test("the same file recreates when the image behind the tag moved")
+    func movedImageRecreates() async throws {
+        let proj = try hashProject()
+        let mock = FakeEngine(imageDigests: ["x": "sha256:aaa"])
+        try await stamped(mock, project: proj)
+
+        await mock.setImageDigests(["x": "sha256:bbb"])  // `docker pull` upstream
+        let result = try await ComposeOrchestrator(engine: mock).up(project: proj)
+        #expect(result.unchanged.isEmpty)
+        #expect(await mock.operations == ["rm:demo-web", "run:demo-web"])
+    }
+
+    @Test("--force-recreate recreates an unchanged service")
+    func forceRecreate() async throws {
+        let proj = try hashProject()
+        let mock = FakeEngine(imageDigests: ["x": "sha256:aaa"])
+        try await stamped(mock, project: proj)
+
+        let result = try await ComposeOrchestrator(engine: mock).up(project: proj, forceRecreate: true)
+        #expect(result.unchanged.isEmpty)
+        #expect(await mock.operations == ["rm:demo-web", "run:demo-web"])
+    }
+
+    @Test("a container from before hashing existed is recreated once")
+    func unlabelledContainerRecreates() async throws {
+        let proj = try hashProject()
+        let mock = FakeEngine(imageDigests: ["x": "sha256:aaa"])
+        // labelled by an older build of this plugin: no config-hash
+        await mock.setContainers([composeContainer(project: "demo", service: "web")])
+        let result = try await ComposeOrchestrator(engine: mock).up(project: proj)
+        #expect(result.unchanged.isEmpty)
+        #expect(await mock.operations == ["rm:demo-web", "run:demo-web"])
+    }
+
+    /// The first `up` on a machine that does not have the image yet used to stamp a
+    /// hash with no image id, so the *second* `up` computed a different one and
+    /// destroyed a container that had not changed.
+    @Test("an image that is not pulled yet is pulled before the fingerprint is taken")
+    func imageIsPulledBeforeHashing() async throws {
+        let proj = try hashProject()
+        let mock = FakeEngine(imagesPresent: false)
+        try await ComposeOrchestrator(engine: mock).up(project: proj)
+        #expect(await mock.operations.contains("forward:image pull x"))
+
+        // …so the next `up` sees the same fingerprint and leaves it alone.
+        let created = try #require(await mock.listContainers().first { $0.composeService == "web" })
+        await mock.setContainers([created])
+        await mock.clearOperations()
+        let second = try await ComposeOrchestrator(engine: mock).up(project: proj)
+        #expect(second.unchanged == ["web"])
+    }
+
+    @Test("a service with both build: and image: hashes the image it will actually run")
+    func buildAndImageHashesTheRunImage() async throws {
+        let proj = try project("""
+        name: demo
+        services:
+          web:
+            build: ./web
+            image: myapp:dev
+        """)
+        let mock = FakeEngine(imageDigests: ["myapp:dev": "sha256:aaa", "demo-web:compose": "sha256:zzz"])
+        try await stamped(mock, project: proj)
+
+        // The build tag moves; the image the container runs does not.
+        await mock.setImageDigests(["myapp:dev": "sha256:aaa", "demo-web:compose": "sha256:different"])
+        #expect(try await ComposeOrchestrator(engine: mock).up(project: proj).unchanged == ["web"])
+
+        // The run image moves; that must recreate.
+        await mock.setImageDigests(["myapp:dev": "sha256:bbb", "demo-web:compose": "sha256:different"])
+        #expect(try await ComposeOrchestrator(engine: mock).up(project: proj).unchanged.isEmpty)
+    }
+
+    @Test("a stopped container that refuses to start is recreated rather than failing up")
+    func unresumableContainerIsRecreated() async throws {
+        let proj = try hashProject()
+        let mock = FakeEngine(imageDigests: ["x": "sha256:aaa"])
+        try await stamped(mock, project: proj, state: "stopped")
+        await mock.setStartFails(true)
+
+        let result = try await ComposeOrchestrator(engine: mock).up(project: proj)
+        #expect(result.unchanged.isEmpty)
+        #expect(await mock.operations == ["start:demo-web", "rm:demo-web", "run:demo-web"])
+    }
+
+    @Test("the created container carries the fingerprint")
+    func containerIsStamped() async throws {
+        let mock = FakeEngine(imageDigests: ["x": "sha256:aaa"])
+        try await ComposeOrchestrator(engine: mock).up(project: try hashProject())
+        let created = try #require(await mock.listContainers().first)
+        #expect(created.labels[ComposeLabels.configHash]?.count == 64)  // hex SHA-256
     }
 
     // MARK: - service-name DNS
