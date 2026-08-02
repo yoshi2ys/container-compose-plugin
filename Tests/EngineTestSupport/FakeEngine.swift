@@ -28,6 +28,12 @@ public actor FakeEngine: ContainerEngine {
     /// mean resolution works.
     private var domains: [String]
     private var resolutionWorks: Bool
+    /// Image ref → id. A ref with no entry reads as present with a synthetic id
+    /// unless `imagesPresent` is false, which models "not pulled yet".
+    private var digests: [String: String]
+    private var imagesPresent: Bool
+    /// Models a container that cannot be resumed — a port since taken, say.
+    private var startFails = false
     /// Every mutating call, in order, as `"<verb>:<subject>"`. Reads are not
     /// recorded — every command issues them, and they would drown the signal.
     public private(set) var operations: [String] = []
@@ -54,8 +60,12 @@ public actor FakeEngine: ContainerEngine {
         exiting: Set<String> = [],
         logLines: [String: [String]] = [:],
         dnsDomains: [String] = [],
-        resolutionWorks: Bool = true
+        resolutionWorks: Bool = true,
+        imageDigests: [String: String] = [:],
+        imagesPresent: Bool = true
     ) {
+        self.digests = imageDigests
+        self.imagesPresent = imagesPresent
         self.logLines = logLines
         self.domains = dnsDomains
         self.resolutionWorks = resolutionWorks
@@ -81,6 +91,15 @@ public actor FakeEngine: ContainerEngine {
     public func hostGateway() async throws -> String? { nil }
     public func listContainers() async throws -> [ContainerSummary] { containers }
     public func dnsDomains() async throws -> [String] { domains }
+    public func imageDigest(ref: String) async throws -> String? {
+        if let known = digests[ref] { return known }
+        return imagesPresent ? "sha256:synthetic-\(ref)" : nil
+    }
+    public func setImageDigests(_ value: [String: String]) { digests = value }
+    /// A `forward` of `image pull` makes the image present from then on.
+    public func setImagesPresent(_ value: Bool) { imagesPresent = value }
+    /// Forget the operations so far, so a test can assert only what a second `up` did.
+    public func clearOperations() { operations = [] }
     public func setDomains(_ value: [String]) { domains = value }
     public func setResolutionWorks(_ value: Bool) { resolutionWorks = value }
 
@@ -141,8 +160,11 @@ public actor FakeEngine: ContainerEngine {
         setState(of: name, to: "stopped")
     }
 
+    public func setStartFails(_ value: Bool) { startFails = value }
+
     public func start(name: String) async throws {
         operations.append("start:\(name)")
+        if startFails { throw EngineError(argv: ["start", name], exitCode: 1, stderr: "port in use") }
         setState(of: name, to: "running")
     }
 
@@ -161,6 +183,10 @@ public actor FakeEngine: ContainerEngine {
 
     public func forward(argv: [String]) async throws -> Int32 {
         operations.append("forward:\(argv.joined(separator: " "))")
+        // A successful pull makes the image present, as the real engine would.
+        if argv.first == "image", argv.dropFirst().first == "pull", forwardExit == 0 {
+            imagesPresent = true
+        }
         return forwardExit
     }
 

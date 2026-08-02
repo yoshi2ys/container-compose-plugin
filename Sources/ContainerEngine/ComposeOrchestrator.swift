@@ -36,12 +36,18 @@ public struct UpResult: Sendable, Equatable {
     public let completed: [String]
     /// Services that are not running and were not meant to exit.
     public let stopped: [String]
+    /// Services left exactly as they were: same configuration, already running.
+    public let unchanged: [String]
 
-    public init(warnings: [Warning], running: [String], completed: [String], stopped: [String]) {
+    public init(
+        warnings: [Warning], running: [String], completed: [String], stopped: [String],
+        unchanged: [String] = []
+    ) {
         self.warnings = warnings
         self.running = running
         self.completed = completed
         self.stopped = stopped
+        self.unchanged = unchanged
     }
 
     /// Every service `up` tried to start.
@@ -72,7 +78,9 @@ public struct ComposeOrchestrator: Sendable {
     public func up(
         project: ComposeProject,
         activeProfiles: Set<String> = [],
-        options: TranslateOptions = TranslateOptions()
+        options: TranslateOptions = TranslateOptions(),
+        forceRecreate: Bool = false,
+        noCache: Bool = false
     ) async throws -> UpResult {
         guard try await engine.systemRunning() else { throw OrchestratorError.systemNotRunning }
 
@@ -100,13 +108,11 @@ public struct ComposeOrchestrator: Sendable {
 
         // Translate everything first; refuse to start if anything is blocking.
         var warnings: [Warning] = []
-        var runArgsByService: [String: [String]] = [:]
         let order = plan.waves.flatMap { $0 }
         let started = Set(order)
         for serviceName in order {
             let result = ComposeTranslate.runArgs(serviceName: serviceName, project: project, options: options)
             warnings.append(contentsOf: result.warnings)
-            runArgsByService[serviceName] = result.argv
         }
         let blocking = warnings.filter { $0.severity == .blocking }
         guard blocking.isEmpty else { throw OrchestratorError.blocking(blocking) }
@@ -133,8 +139,10 @@ public struct ComposeOrchestrator: Sendable {
             }
         }
 
-        // Start wave by wave, recreating each container so `up` is idempotent and
-        // recovers from a partial prior run; named volumes persist, so data is kept.
+        // Start wave by wave. A service whose configuration is unchanged and whose
+        // container is already running is left alone; everything else is recreated,
+        // so `up` stays idempotent and recovers from a partial prior run.
+        var unchanged: [String] = []
         for wave in plan.waves {
             for serviceName in wave {
                 guard let service = project.services[serviceName] else { continue }
@@ -148,22 +156,64 @@ public struct ComposeOrchestrator: Sendable {
                         warnings.append(warning)
                     }
                 }
+                // Built before the fingerprint is taken, so a changed Dockerfile
+                // shows up as a changed image id and forces the recreate.
                 if service.build != nil,
                     let build = ComposeTranslate.buildArgs(
-                        serviceName: serviceName, project: project, baseDirectory: options.baseDirectory) {
+                        serviceName: serviceName, project: project,
+                        baseDirectory: options.baseDirectory, noCache: noCache) {
                     try await engine.build(argv: build.argv)
                 }
-                if let argv = runArgsByService[serviceName] {
-                    // Remove every container this project already has for the service,
-                    // not just the one under the name the file implies now: changing
-                    // `container_name` would otherwise leave the old one running with
-                    // the same labels, and two containers would answer for one service.
-                    for stale in Self.staleContainers(
-                        for: serviceName, project: project, in: existing, domain: domain) {
-                        try? await engine.remove(name: stale.id, force: true)
+
+                let translated = ComposeTranslate.runArgs(
+                    serviceName: serviceName, project: project, options: options)
+                // The image the container will actually run, which is what the
+                // fingerprint has to follow — `image:` wins over the build tag, the
+                // same way the run argv picks it.
+                let imageReference = service.image
+                    ?? ComposeNaming.imageTag(project: project, service: serviceName)
+                let imageID = await imageID(of: imageReference, pullable: service.image != nil)
+
+                // A gateway the compose file declares itself is configuration; the
+                // injected one moves on its own and must stay out of the fingerprint.
+                let declaresGateway = service.environment.entries.contains { $0.key == "HOST_GATEWAY" }
+                let hash = ComposeHash.digest(
+                    argv: ComposeHash.normalize(
+                        translated.argv, positionalIndex: translated.positionalIndex,
+                        excludingInjectedGateway: !declaresGateway),
+                    imageID: imageID)
+
+                let current = Self.container(
+                    for: serviceName, project: project, in: existing, domain: domain)
+                if !forceRecreate, let current, current.labels[ComposeLabels.configHash] == hash {
+                    // Nothing about the service changed. Recreating would restart it
+                    // for no reason and lose anything written outside a volume.
+                    if current.isRunning {
+                        unchanged.append(serviceName)
+                        continue
                     }
-                    _ = try await engine.run(argv: argv)
+                    // A stopped container that cannot be resumed — a port since taken,
+                    // say — must not take the whole `up` down with it; fall through and
+                    // recreate instead.
+                    if (try? await engine.start(name: current.id)) != nil { continue }
                 }
+
+                // Remove every container this project already has for the service,
+                // not just the one under the name the file implies now: changing
+                // `container_name` would otherwise leave the old one running with
+                // the same labels, and two containers would answer for one service.
+                for stale in Self.staleContainers(
+                    for: serviceName, project: project, in: existing, domain: domain) {
+                    try? await engine.remove(name: stale.id, force: true)
+                }
+                // Re-translated rather than appended to: the argv ends with the image
+                // and the command, so a label tacked on the end becomes an argument to
+                // the container's own process.
+                var stamped = options
+                stamped.configHash = hash
+                _ = try await engine.run(
+                    argv: ComposeTranslate.runArgs(
+                        serviceName: serviceName, project: project, options: stamped).argv)
             }
         }
 
@@ -201,7 +251,8 @@ public struct ComposeOrchestrator: Sendable {
                 severity: .info))
         }
         return UpResult(
-            warnings: warnings, running: running, completed: completed, stopped: stopped)
+            warnings: warnings, running: running, completed: completed, stopped: stopped,
+            unchanged: unchanged)
     }
 
     /// Build (or rebuild) images for services that declare a `build:` section —
@@ -485,6 +536,20 @@ public struct ComposeOrchestrator: Sendable {
         if let tail { argv += ["-n", "\(tail)"] }
         argv += [name]
         return try await engine.forward(argv: argv)
+    }
+
+    /// The id of the image a service will run, pulling it first when it is not here
+    /// yet.
+    ///
+    /// `container run` pulls implicitly, but it does so *after* the fingerprint is
+    /// taken — leaving the first `up` to stamp a hash with no image id and the second
+    /// to compute a different one and destroy a container that had not changed.
+    /// Pulling here only moves work that was going to happen anyway.
+    private func imageID(of reference: String, pullable: Bool) async -> String? {
+        if let id = try? await engine.imageDigest(ref: reference) { return id }
+        guard pullable, (try? await engine.forward(argv: ["image", "pull", reference])) == 0
+        else { return nil }
+        return try? await engine.imageDigest(ref: reference)
     }
 
     // MARK: - service-name DNS

@@ -134,6 +134,16 @@ public actor CLIContainerEngine: ContainerEngine {
             .filter { !$0.isEmpty && $0.lowercased() != "domain" }
     }
 
+    public func imageDigest(ref: String) async throws -> String? {
+        // `run` rather than `capture`: an image that is not pulled yet is a normal
+        // state, not an error.
+        let result = try await runner.run(executable, prefix + ["image", "inspect", ref])
+        guard result.exitCode == 0, let data = result.stdoutString.data(using: .utf8),
+            let array = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return nil }
+        return array.first?["id"] as? String
+    }
+
     public func listContainers() async throws -> [ContainerSummary] {
         let result = try await capture(["list", "--all", "--format", "json"])
         return try Self.decodeList(result.stdout)
