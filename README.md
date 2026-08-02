@@ -153,7 +153,13 @@ swift run compose --help
 
 The only external dependency is [Yams](https://github.com/jpsim/Yams) (YAML parsing);
 everything else is Foundation. Code is organized into testable modules: `ComposeModel`,
-`ComposeGraph`, `ComposeTranslate`, `ContainerEngine`, and the `compose` executable.
+`ComposeGraph`, `ComposeTranslate`, `ContainerEngine`, `ComposeCLICore`, and the
+`compose` executable (a thin `@main` shim over `ComposeCLICore`).
+
+CI runs `swift build && swift test` on every push and pull request. It stops there
+on purpose: Apple `container` needs Virtualization.framework, which GitHub's macOS
+runners do not provide, so **anything that drives the real engine is verified
+locally, not in CI**.
 
 ## License
 
