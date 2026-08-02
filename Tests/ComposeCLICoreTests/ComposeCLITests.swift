@@ -376,6 +376,182 @@ struct ComposeCLITests {
         #expect(run.stderr.contains("no such service: nope"))
     }
 
+    // MARK: - stop / start / restart / pull / exec / config
+
+    private static var runningStack: FakeEngine {
+        FakeEngine(containers: [
+            composeContainer(project: "demo", service: "web"),
+            composeContainer(project: "demo", service: "worker"),
+        ])
+    }
+
+    @Test("stop works in reverse dependency order and leaves the containers in place")
+    func stopOrder() async {
+        let run = await runCLI(["stop"], files: Self.files, engine: Self.runningStack)
+        #expect(run.exitCode == 0)
+        #expect(run.stdout == "Stopped 2 container(s) in demo.\n")
+        #expect(run.operations == ["stop:demo-worker", "stop:demo-web"])
+    }
+
+    @Test("start works in dependency order and skips containers already running")
+    func startOrder() async {
+        let engine = FakeEngine(containers: [
+            composeContainer(project: "demo", service: "web", state: "stopped"),
+            composeContainer(project: "demo", service: "worker", state: "stopped"),
+        ])
+        let run = await runCLI(["start"], files: Self.files, engine: engine)
+        #expect(run.operations == ["start:demo-web", "start:demo-worker"])
+
+        let alreadyUp = await runCLI(["start"], files: Self.files, engine: Self.runningStack)
+        #expect(alreadyUp.operations.isEmpty)
+        #expect(alreadyUp.stdout == "No containers to start in demo.\n")
+    }
+
+    @Test("restart stops in reverse order, then starts in dependency order")
+    func restartOrder() async {
+        let run = await runCLI(["restart"], files: Self.files, engine: Self.runningStack)
+        #expect(run.exitCode == 0)
+        #expect(run.operations == [
+            "stop:demo-worker", "stop:demo-web", "start:demo-web", "start:demo-worker",
+        ])
+    }
+
+    @Test("stop/start touch nothing when the project has no containers")
+    func lifecycleWithoutContainers() async {
+        #expect(await runCLI(["stop"], files: Self.files).stdout == "No containers to stop in demo.\n")
+    }
+
+    @Test("pull fetches the image of every service that names one")
+    func pullImages() async {
+        let run = await runCLI(["pull"], files: ["/work/compose.yaml": """
+            name: demo
+            services:
+              web:
+                image: nginx
+              app:
+                build: ./app
+            """])
+        #expect(run.exitCode == 0)
+        #expect(run.operations == ["forward:image pull nginx"])
+        #expect(run.stdout == "Pulled 1 image(s).\n")
+    }
+
+    @Test("pull says so when nothing has an image")
+    func pullNothing() async {
+        let run = await runCLI(["pull"], files: ["/work/compose.yaml": """
+            name: demo
+            services:
+              app:
+                build: ./app
+            """])
+        #expect(run.stdout == "No services declare an image to pull.\n")
+    }
+
+    @Test("exec attaches to the resolved container and passes the command through")
+    func execRunsCommand() async {
+        let engine = FakeEngine(containers: [
+            composeContainer(project: "demo", service: "web", name: "renamed")
+        ])
+        let run = await runCLI(["exec", "web", "ls", "-la", "/srv"], files: Self.files, engine: engine)
+        #expect(run.exitCode == 0)
+        #expect(run.operations == ["forward:exec -i renamed ls -la /srv"])
+    }
+
+    @Test("exec does not eat the inner command's own options")
+    func execPassesOptionsThrough() async {
+        let run = await runCLI(
+            ["exec", "web", "ls", "--tail", "--profile"], files: Self.files, engine: Self.runningStack)
+        #expect(run.operations == ["forward:exec -i demo-web ls --tail --profile"])
+    }
+
+    @Test("exec asks for a TTY only when stdin is one")
+    func execTTYOnlyWhenInteractive() async {
+        // `container exec -t` fails with "Operation not supported by device" when
+        // stdin is a pipe, which would break every scripted exec.
+        let interactive = await runCLI(
+            ["exec", "web", "sh"], files: Self.files, engine: Self.runningStack, isTTY: true)
+        #expect(interactive.operations == ["forward:exec -i -t demo-web sh"])
+    }
+
+    @Test("exec needs a service and a command")
+    func execRequiresArguments() async {
+        #expect(await runCLI(["exec"], files: Self.files).stderr.contains("needs a service"))
+        #expect(await runCLI(["exec", "web"], files: Self.files).stderr.contains("needs a command to run"))
+        #expect(await runCLI(["exec", "nope", "ls"], files: Self.files).stderr.contains("no such service: nope"))
+    }
+
+    @Test("config prints the interpolated file and every diagnostic, info included")
+    func configPrintsEverything() async {
+        let run = await runCLI(["config"], files: [
+            "/work/compose.yaml": """
+                name: demo
+                x-extra: ignored
+                services:
+                  web:
+                    image: nginx:${TAG}
+                    ports: ["80:80"]
+                """,
+            "/work/.env": "TAG=1.25\n",
+        ])
+        #expect(run.exitCode == 0)
+        #expect(run.stdout.contains("nginx:1.25"))  // substituted, not "${TAG}"
+        // info-level diagnostics that `up` keeps quiet about
+        #expect(run.stderr.contains("note: Top-level key 'x-extra' is not supported"))
+        #expect(run.stderr.contains("note: [web] Publishing privileged host port 80"))
+    }
+
+    @Test("config reports a dependency the graph cannot resolve, and fails")
+    func configReportsGraphErrors() async {
+        let run = await runCLI(["config"], files: ["/work/compose.yaml": """
+            name: demo
+            services:
+              web:
+                image: nginx
+                depends_on: [ghost]
+            """])
+        #expect(run.exitCode == 1)
+        #expect(run.stderr.contains("dependency error"))
+    }
+
+    @Test("config shows the project name the other commands use, even when the file omits it")
+    func configShowsResolvedProjectName() async {
+        let run = await runCLI(["config"], files: ["/work/compose.yaml": "services:\n  web:\n    image: nginx\n"])
+        #expect(run.exitCode == 0)
+        #expect(run.stdout.contains("name: work"))
+    }
+
+    @Test("parse warnings reach every command, not just the ones that start containers")
+    func warningsOnEveryCommand() async {
+        let files = ["/work/compose.yaml": """
+            name: demo
+            services:
+              web:
+                image: nginx:${TAG}
+            """]
+        for command in ["pull", "stop", "start", "restart", "ps", "down"] {
+            let run = await runCLI([command], files: files)
+            #expect(
+                run.stderr.contains("The 'TAG' variable is not set"),
+                "\(command) should report the unset variable")
+        }
+    }
+
+    @Test("--verbose surfaces info diagnostics on other commands too")
+    func verboseShowsInfo() async {
+        let files = ["/work/compose.yaml": """
+            name: demo
+            services:
+              web:
+                image: nginx
+                ports: ["80:80"]
+            """]
+        let quiet = await runCLI(["up"], files: files)
+        #expect(!quiet.stderr.contains("privileged host port"))
+
+        let loud = await runCLI(["--verbose", "up"], files: files)
+        #expect(loud.stderr.contains("note: [web] Publishing privileged host port 80"))
+    }
+
     @Test("build with no build: sections says so")
     func buildNothingToBuild() async {
         let run = await runCLI(["build"], files: Self.files)

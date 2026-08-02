@@ -93,6 +93,10 @@ public actor CLIContainerEngine: ContainerEngine {
         _ = try await capture(argv)
     }
 
+    public func start(name: String) async throws {
+        _ = try await capture(["start", name])
+    }
+
     public func remove(name: String, force: Bool) async throws {
         var argv = ["delete"]
         if force { argv += ["-f"] }

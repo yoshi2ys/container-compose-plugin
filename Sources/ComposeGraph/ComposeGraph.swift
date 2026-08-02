@@ -14,11 +14,20 @@ public struct StartupPlan: Sendable, Equatable {
     }
 }
 
-public enum GraphError: Error, Equatable, Sendable {
+public enum GraphError: Error, Equatable, Sendable, CustomStringConvertible {
     /// `depends_on` references a service not defined anywhere in the file.
     case missingDependency(service: String, dependency: String)
     /// A dependency cycle; the associated names are the services still entangled.
     case cycle([String])
+
+    public var description: String {
+        switch self {
+        case .missingDependency(let service, let dependency):
+            return "service '\(service)' depends on '\(dependency)', which the file does not define"
+        case .cycle(let services):
+            return "these services depend on each other in a cycle: \(services.joined(separator: ", "))"
+        }
+    }
 }
 
 public enum ComposeGraph {

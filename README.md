@@ -7,6 +7,7 @@ run multi-container apps from a Docker Compose file as a first-class subcommand:
 container compose up      # start the stack (dependency order)
 container compose ps      # list the stack's containers
 container compose logs    # show logs
+container compose exec web sh   # run a command in a service's container
 container compose down    # stop and remove (reverse order)
 ```
 
@@ -54,22 +55,44 @@ container compose --help
 container compose [-f <file>] [--profile <name>]... <command> [args]
 
 COMMANDS
-  up                  Create and start the stack (dependency order)
-  down                Stop and remove the stack (reverse order)
-  build [service...]  Build images for services with a build: section
-  ps                  List the stack's containers
-  logs [service]      Show logs
+  up                       Create and start the stack (dependency order)
+  down                     Stop and remove the stack (reverse order)
+  start                    Start the stack's stopped containers
+  stop                     Stop the containers without removing them
+  restart                  Stop then start the containers
+  build [service...]       Build images for services with a build: section
+  pull [service...]        Pull the images services declare
+  ps                       List the stack's containers
+  logs [service]           Show logs
+  exec <service> <cmd>...  Run a command in a service's container
+  config                   Print the compose file with variables substituted
 
 OPTIONS
   -f, --file <file>   Compose file (default: ./compose.yaml, compose.yml,
                       docker-compose.yaml, docker-compose.yml)
   --profile <name>    Activate a compose profile (repeatable)
+  --verbose           Also show info-level diagnostics
   -h, --help          Show this help
 ```
 
 Each command has its own options and its own help — `container compose build --help`
 lists `--no-cache`, `container compose logs --help` lists `--follow` and `--tail <n>`.
 An option a command does not accept is an error, never a silent no-op.
+
+Everything after `exec <service>` is passed through untouched, so
+`container compose exec web ls --all` reaches `ls`, not this parser. A TTY is
+requested only when stdin is one, so `exec` works from a script as well as from a
+terminal.
+
+`stop` stops every container the project owns, profiles included — leaving one
+running that no later `stop` would reach is worse than stopping one extra. `start`
+only starts what `up` would have started, and `restart` puts back exactly what it
+took down.
+
+`container compose config` prints the file as the other commands read it — after
+`${…}` substitution — followed by **every** diagnostic, including the info-level
+notes the other commands keep out of the way. It is the place to look when a key
+seems to have been ignored. `--verbose` shows those notes on any command.
 
 Example (`examples/compose.yaml`):
 

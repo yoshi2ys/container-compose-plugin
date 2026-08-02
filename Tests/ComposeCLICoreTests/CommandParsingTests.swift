@@ -104,8 +104,8 @@ struct CommandParsingTests {
 
     @Test("an unknown option before any command is reported with the usage")
     func unknownGlobalOption() {
-        let message = failure(["--verbose", "up"])
-        #expect(message?.hasPrefix("Unknown option '--verbose'.") == true)
+        let message = failure(["--nonsense", "up"])
+        #expect(message?.hasPrefix("Unknown option '--nonsense'.") == true)
     }
 
     @Test("options with no command at all fall back to the usage")

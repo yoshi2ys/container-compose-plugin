@@ -226,14 +226,11 @@ public struct ComposeOrchestrator: Sendable {
         case .failure: order = project.serviceNames.reversed()
         }
 
-        let owned = try await ownedContainers(project: project)
-        let byService = Dictionary(grouping: owned) { $0.composeService ?? "" }
-        let defined = Set(order)
-        // The services the file still describes, in shutdown order; then whatever
-        // carries our project label but matches no current service — a renamed or
-        // deleted one. It is still ours to remove.
-        let names = order.flatMap { byService[$0]?.map(\.id) ?? [] }
-            + owned.filter { !defined.contains($0.composeService ?? "") }.map(\.id)
+        // Everything else the project owns — a service excluded by a profile, or one
+        // renamed away — is still ours to remove. It goes first on this reverse pass,
+        // since it may depend on a service the file still describes.
+        let (ordered, rest) = try await partition(project: project, services: order)
+        let names = (rest + ordered).map(\.id)
 
         for name in names {
             try? await engine.stop(name: name, timeout: nil)
@@ -254,6 +251,154 @@ public struct ComposeOrchestrator: Sendable {
             if defined.contains(left) != defined.contains(right) { return defined.contains(left) }
             return left == right ? lhs.id < rhs.id : left < right
         }
+    }
+
+    /// Stop the project's running containers in shutdown order, leaving them in
+    /// place. Returns the containers it stopped.
+    ///
+    /// Stops **everything** the project owns, profiles included: leaving a container
+    /// running that `stop` will not stop again is worse than stopping one extra.
+    @discardableResult
+    public func stop(project: ComposeProject, activeProfiles: Set<String> = []) async throws -> [String] {
+        try await apply(
+            project: project, activeProfiles: activeProfiles, reversed: true, scope: .everythingOwned
+        ) { container in
+            guard container.isRunning else { return false }
+            try await engine.stop(name: container.id, timeout: nil)
+            return true
+        }
+    }
+
+    /// Start the project's stopped containers in dependency order.
+    ///
+    /// Only the services the active profiles include: `up` would not start a
+    /// profile-excluded service, so neither does `start`.
+    @discardableResult
+    public func start(project: ComposeProject, activeProfiles: Set<String> = []) async throws -> [String] {
+        try await apply(
+            project: project, activeProfiles: activeProfiles, reversed: false, scope: .activeProfiles
+        ) { container in
+            guard !container.isRunning else { return false }
+            try await engine.start(name: container.id)
+            return true
+        }
+    }
+
+    /// Stop then start the project's containers — stopping in shutdown order and
+    /// starting in dependency order, so a restart never leaves a dependent running
+    /// without its dependency.
+    ///
+    /// Everything it stops, it starts again: a container excluded by a profile is
+    /// still put back the way it was found.
+    @discardableResult
+    public func restart(project: ComposeProject, activeProfiles: Set<String> = []) async throws -> [String] {
+        let stopped = try await apply(
+            project: project, activeProfiles: activeProfiles, reversed: true, scope: .everythingOwned
+        ) { container in
+            try await engine.stop(name: container.id, timeout: nil)
+            return true
+        }
+        let toStart = Set(stopped)
+        return try await apply(
+            project: project, activeProfiles: activeProfiles, reversed: false, scope: .everythingOwned
+        ) { container in
+            guard toStart.contains(container.id) else { return false }
+            try await engine.start(name: container.id)
+            return true
+        }
+    }
+
+    /// Pull the images of services that name one. `services`, when non-empty,
+    /// restricts the set. Returns the image references pulled.
+    @discardableResult
+    public func pull(project: ComposeProject, services: [String] = []) async throws -> [String] {
+        guard try await engine.systemRunning() else { throw OrchestratorError.systemNotRunning }
+        // `build:`-only services have no image to pull; `build` covers those.
+        let requested = services.isEmpty ? project.serviceNames : services
+        var seen: Set<String> = []
+        let images = requested.compactMap { project.services[$0]?.image }.filter { seen.insert($0).inserted }
+        var pulled: [String] = []
+        for image in images {
+            let code = try await engine.forward(argv: ["image", "pull", image])
+            guard code == 0 else {
+                throw EngineError(argv: ["image", "pull", image], exitCode: code, stderr: "")
+            }
+            pulled.append(image)
+        }
+        return pulled
+    }
+
+    /// Run a command inside a service's container, with this process's stdio
+    /// attached. Returns the command's exit code.
+    ///
+    /// Uses `forward`, not `engine.exec`: the latter captures output and cannot
+    /// support an interactive session. `tty` must reflect whether stdin really is a
+    /// terminal — `container exec -t` fails with "Operation not supported by device"
+    /// when it is not, which would break every scripted `exec`.
+    public func exec(
+        project: ComposeProject, service: String, command: [String], tty: Bool
+    ) async throws -> Int32 {
+        guard try await engine.systemRunning() else { throw OrchestratorError.systemNotRunning }
+        let name = try await resolvedName(service: service, project: project)
+        return try await engine.forward(argv: ["exec", "-i"] + (tty ? ["-t"] : []) + [name] + command)
+    }
+
+    /// Applies `action` to the project's containers in dependency order (or its
+    /// reverse), returning the names it acted on. Containers for services no longer
+    /// in the file come last, as in `down`.
+    /// Which of the project's containers a lifecycle command acts on.
+    enum Scope {
+        /// Only the services the active profiles include, plus containers whose
+        /// service is gone from the file.
+        case activeProfiles
+        /// Every container carrying the project's label.
+        case everythingOwned
+    }
+
+    private func apply(
+        project: ComposeProject,
+        activeProfiles: Set<String>,
+        reversed: Bool,
+        scope: Scope,
+        action: (ContainerSummary) async throws -> Bool
+    ) async throws -> [String] {
+        guard try await engine.systemRunning() else { throw OrchestratorError.systemNotRunning }
+
+        var order: [String]
+        switch ComposeGraph.startupPlan(project, activeProfiles: activeProfiles) {
+        case .success(let plan): order = reversed ? plan.shutdownOrder : plan.waves.flatMap { $0 }
+        case .failure: order = reversed ? project.serviceNames.reversed() : project.serviceNames
+        }
+
+        let (ordered, rest) = try await partition(project: project, services: order)
+        // Whatever `order` does not cover goes first when unwinding and last when
+        // building up: nothing in the file depends on it, but it may depend on
+        // something that is.
+        let defined = Set(project.serviceNames)
+        let extras = scope == .everythingOwned
+            ? rest
+            : rest.filter { !defined.contains($0.composeService ?? "") }
+        let targets = reversed ? extras + ordered : ordered + extras
+
+        var acted: [String] = []
+        for container in targets {
+            if try await action(container) { acted.append(container.id) }
+        }
+        return acted
+    }
+
+    /// Splits the project's containers into those matching `services`, in that order,
+    /// and everything else the project owns.
+    private func partition(
+        project: ComposeProject, services: [String]
+    ) async throws -> (ordered: [ContainerSummary], rest: [ContainerSummary]) {
+        let owned = try await ownedContainers(project: project)
+        let byService = Dictionary(grouping: owned) { $0.composeService ?? "" }
+        let covered = Set(services)
+        return (
+            services.flatMap { byService[$0] ?? [] },
+            owned.filter { !covered.contains($0.composeService ?? "") }
+        )
     }
 
     /// Stream logs for a service (or the first service) — passthrough to `container logs`.

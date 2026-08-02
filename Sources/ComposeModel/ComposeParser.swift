@@ -62,6 +62,46 @@ public enum ComposeParser {
         projectNameFallback: String,
         environment: (String) -> String? = { _ in nil }
     ) throws -> ParseResult {
+        try composing(yaml, environment: environment) { interpolated, unset in
+            var project = try YAMLDecoder().decode(ComposeProject.self, from: interpolated)
+            if (project.name ?? "").isEmpty {
+                project.name = sanitizeProjectName(projectNameFallback)
+            }
+
+            var warnings = collectUnsupportedKeyWarnings(
+                raw: interpolated.any as? [String: Any], project: &project)
+            warnings += unsetVariableWarnings(unset)
+            return ParseResult(project: project, warnings: warnings.sortedForDisplay())
+        }
+    }
+
+    /// The compose file as YAML with every `${…}` substituted — what `compose config`
+    /// prints, and what the rest of the pipeline actually reads.
+    /// `projectNameFallback` is written into the output when the file has no
+    /// `name:`, so the document shows the project name the other commands use.
+    public static func interpolatedDocument(
+        _ yaml: String,
+        projectNameFallback: String,
+        environment: (String) -> String? = { _ in nil }
+    ) throws -> String {
+        try composing(yaml, environment: environment) { interpolated, _ in
+            var root = interpolated
+            if let mapping = root.mapping, (mapping["name"]?.string ?? "").isEmpty {
+                // Prepended, so the document reads the way a compose file is written.
+                let pairs: [(Node, Node)] = [(Node("name"), Node(sanitizeProjectName(projectNameFallback)))]
+                    + mapping.map { ($0, $1) }
+                root = .mapping(Node.Mapping(pairs, mapping.tag, mapping.style, mapping.mark, mapping.anchor))
+            }
+            return try Yams.serialize(node: root)
+        }
+    }
+
+    /// Composes the document once, interpolates it, and hands the result to `body`.
+    private static func composing<T>(
+        _ yaml: String,
+        environment: (String) -> String?,
+        _ body: (Node, [String]) throws -> T
+    ) throws -> T {
         // `Resolver([.merge])` is what `YAMLDecoder` uses internally: scalars keep
         // their string form and `Decodable` does the coercion. Resolving tags here
         // instead would change how values decode.
@@ -72,19 +112,9 @@ public enum ComposeParser {
         let parser = try Yams.Parser(yaml: yaml, resolver: Resolver.basic.appending(.merge))
         return try withExtendedLifetime(parser) {
             guard let root = try parser.singleRoot() else { throw ComposeParseError.emptyDocument }
-
             var unset: [String] = []
             let interpolated = try interpolate(root, path: "", environment: environment, unset: &unset)
-
-            var project = try YAMLDecoder().decode(ComposeProject.self, from: interpolated)
-            if (project.name ?? "").isEmpty {
-                project.name = sanitizeProjectName(projectNameFallback)
-            }
-
-            var warnings = collectUnsupportedKeyWarnings(
-                raw: interpolated.any as? [String: Any], project: &project)
-            warnings += unsetVariableWarnings(unset)
-            return ParseResult(project: project, warnings: warnings.sortedForDisplay())
+            return try body(interpolated, unset)
         }
     }
 

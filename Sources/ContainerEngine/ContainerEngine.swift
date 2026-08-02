@@ -110,6 +110,8 @@ public protocol ContainerEngine: Sendable {
     func state(name: String) async throws -> ContainerState
     /// Stop a container by name.
     func stop(name: String, timeout: Int?) async throws
+    /// Start an existing, stopped container by name.
+    func start(name: String) async throws
     /// Remove a container by name.
     func remove(name: String, force: Bool) async throws
     /// Run a `container` subcommand with inherited stdio (e.g. `ps`, `logs`); returns exit code.
