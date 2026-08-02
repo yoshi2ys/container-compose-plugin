@@ -8,115 +8,21 @@ import Foundation
 /// orchestrator. Returns the process exit code instead of calling `exit`, so the
 /// whole flow is testable; `Sources/compose` is a thin `@main` shim over this.
 public enum ComposeCLI {
-    public static let usage = """
-        OVERVIEW: Define and run multi-container apps with Apple container.
-
-        USAGE: container compose [-f <file>] [--profile <name>]... <command> [args]
-
-        COMMANDS:
-          up                 Create and start the stack (dependency order)
-          down               Stop and remove the stack (reverse order)
-          build [service...] Build images for services with a build: section
-                             (--no-cache to ignore the builder's layer cache)
-          ps                 List the stack's containers
-          logs [service]     Show logs (--follow, --tail <n>)
-
-        OPTIONS:
-          -f, --file <file>  Compose file (default: ./compose.yaml, compose.yml,
-                             docker-compose.yaml, docker-compose.yml)
-          --profile <name>   Activate a compose profile (repeatable)
-          --no-cache         Build without the builder's layer cache (build only)
-          -h, --help         Show this help
-        """
 
     public static func run(_ context: CLIContext) async -> Int32 {
-        let args = context.arguments
-
-        if args.isEmpty || args.contains("-h") || args.contains("--help") {
-            context.write(usage + "\n")
+        let invocation: Invocation
+        switch CommandLineParser.parse(context.arguments) {
+        case .help(let text):
+            context.write(text + "\n")
             return 0
+        case .failure(let message):
+            return fail(message, context)
+        case .run(let parsed):
+            invocation = parsed
         }
-
-        var file: String?
-        var profiles: Set<String> = []
-        var positional: [String] = []
-        var follow = false
-        var tail: Int?
-        var noCache = false
-
-        var iterator = args.makeIterator()
-        while let arg = iterator.next() {
-            switch arg {
-            case "-f", "--file": file = iterator.next()
-            case "--profile": if let value = iterator.next() { profiles.insert(value) }
-            case "--follow": follow = true
-            case "--tail": tail = iterator.next().flatMap(Int.init)
-            case "--no-cache": noCache = true
-            default: positional.append(arg)
-            }
-        }
-
-        guard let command = positional.first else {
-            return fail(usage, context)
-        }
-        let extras = Array(positional.dropFirst())
 
         do {
-            let orchestrator = ComposeOrchestrator(engine: context.makeEngine())
-
-            switch command {
-            case "up":
-                let loaded = try loadProject(file: file, context: context)
-                printWarnings(loaded.warnings, context)
-                let included = ComposeGraph.includedServices(loaded.project, activeProfiles: profiles)
-                printWarnings(
-                    preflight(
-                        project: loaded.project, baseDirectory: loaded.baseDirectory,
-                        services: included, context: context),
-                    context)
-                let options = TranslateOptions(baseDirectory: loaded.baseDirectory)
-                let runWarnings = try await orchestrator.up(
-                    project: loaded.project, activeProfiles: profiles, options: options)
-                printWarnings(runWarnings, context)
-                context.write("Started \(included.count) service(s).\n")
-                return 0
-            case "down":
-                let loaded = try loadProject(file: file, context: context)
-                try await orchestrator.down(project: loaded.project, activeProfiles: profiles)
-                context.write("Removed \(loaded.project.name ?? "compose").\n")
-                return 0
-            case "build":
-                let loaded = try loadProject(file: file, context: context)
-                printWarnings(loaded.warnings, context)
-                for service in extras where loaded.project.services[service] == nil {
-                    return fail("no such service: \(service)", context)
-                }
-                let built = try await orchestrator.build(
-                    project: loaded.project, services: extras, noCache: noCache,
-                    baseDirectory: loaded.baseDirectory)
-                if built.isEmpty {
-                    context.write(extras.isEmpty
-                        ? "No services with a build: section.\n"
-                        : "No buildable services among: \(extras.joined(separator: ", ")).\n")
-                } else {
-                    context.write("Built \(built.count) image(s).\n")
-                }
-                return 0
-            case "ps":
-                return try await orchestrator.ps()
-            case "logs":
-                let loaded = try loadProject(file: file, context: context)
-                if let service = extras.first, loaded.project.services[service] == nil {
-                    return fail("no such service: \(service)", context)
-                }
-                guard !loaded.project.serviceNames.isEmpty else {
-                    return fail("no services defined in compose file", context)
-                }
-                return try await orchestrator.logs(
-                    project: loaded.project, service: extras.first, follow: follow, tail: tail)
-            default:
-                return fail("Unknown command '\(command)'.\n\n\(usage)", context)
-            }
+            return try await execute(invocation, context)
         } catch let error as OrchestratorError {
             return fail(describe(error), context)
         } catch let error as EngineError {
@@ -125,6 +31,69 @@ public enum ComposeCLI {
                 context)
         } catch {
             return fail("\(error)", context)
+        }
+    }
+
+    private static func execute(_ invocation: Invocation, _ context: CLIContext) async throws -> Int32 {
+        let orchestrator = ComposeOrchestrator(engine: context.makeEngine())
+        let profiles = invocation.profiles
+
+        switch invocation.command {
+        case .up:
+            let loaded = try loadProject(file: invocation.file, context: context)
+            printWarnings(loaded.warnings, context)
+            let included = ComposeGraph.includedServices(loaded.project, activeProfiles: profiles)
+            printWarnings(
+                preflight(
+                    project: loaded.project, baseDirectory: loaded.baseDirectory,
+                    services: included, context: context),
+                context)
+            let options = TranslateOptions(baseDirectory: loaded.baseDirectory)
+            let runWarnings = try await orchestrator.up(
+                project: loaded.project, activeProfiles: profiles, options: options)
+            printWarnings(runWarnings, context)
+            context.write("Started \(included.count) service(s).\n")
+            return 0
+
+        case .down:
+            let loaded = try loadProject(file: invocation.file, context: context)
+            try await orchestrator.down(project: loaded.project, activeProfiles: profiles)
+            context.write("Removed \(ComposeNaming.projectName(loaded.project)).\n")
+            return 0
+
+        case .build:
+            let loaded = try loadProject(file: invocation.file, context: context)
+            printWarnings(loaded.warnings, context)
+            for service in invocation.positionals where loaded.project.services[service] == nil {
+                return fail("no such service: \(service)", context)
+            }
+            let built = try await orchestrator.build(
+                project: loaded.project, services: invocation.positionals,
+                noCache: invocation.noCache, baseDirectory: loaded.baseDirectory)
+            if built.isEmpty {
+                context.write(invocation.positionals.isEmpty
+                    ? "No services with a build: section.\n"
+                    : "No buildable services among: \(invocation.positionals.joined(separator: ", ")).\n")
+            } else {
+                context.write("Built \(built.count) image(s).\n")
+            }
+            return 0
+
+        case .ps:
+            return try await orchestrator.ps()
+
+        case .logs:
+            let loaded = try loadProject(file: invocation.file, context: context)
+            let service = invocation.positionals.first
+            if let service, loaded.project.services[service] == nil {
+                return fail("no such service: \(service)", context)
+            }
+            guard !loaded.project.serviceNames.isEmpty else {
+                return fail("no services defined in compose file", context)
+            }
+            return try await orchestrator.logs(
+                project: loaded.project, service: service,
+                follow: invocation.follow, tail: invocation.tail)
         }
     }
 

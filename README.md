@@ -54,16 +54,22 @@ container compose --help
 container compose [-f <file>] [--profile <name>]... <command> [args]
 
 COMMANDS
-  up                 Create and start the stack (dependency order)
-  down               Stop and remove the stack (reverse order)
-  ps                 List the stack's containers
-  logs [service]     Show logs (--follow, --tail <n>)
+  up                  Create and start the stack (dependency order)
+  down                Stop and remove the stack (reverse order)
+  build [service...]  Build images for services with a build: section
+  ps                  List the stack's containers
+  logs [service]      Show logs
 
 OPTIONS
-  -f, --file <file>  Compose file (default: ./compose.yaml, compose.yml,
-                     docker-compose.yaml, docker-compose.yml)
-  --profile <name>   Activate a compose profile (repeatable)
+  -f, --file <file>   Compose file (default: ./compose.yaml, compose.yml,
+                      docker-compose.yaml, docker-compose.yml)
+  --profile <name>    Activate a compose profile (repeatable)
+  -h, --help          Show this help
 ```
+
+Each command has its own options and its own help — `container compose build --help`
+lists `--no-cache`, `container compose logs --help` lists `--follow` and `--tail <n>`.
+An option a command does not accept is an error, never a silent no-op.
 
 Example (`examples/compose.yaml`):
 
