@@ -401,6 +401,44 @@ public struct ComposeOrchestrator: Sendable {
         )
     }
 
+    /// Follow the logs of every service in the project at once, handing each line to
+    /// `onLine` with the service it came from.
+    ///
+    /// One task per service, none of them going through the engine's serialized
+    /// spawn path — otherwise the first stream would hold it for the lifetime of the
+    /// stack. Returns when every stream ends, or when the surrounding task is
+    /// cancelled (which terminates the readers).
+    public func follow(
+        project: ComposeProject,
+        activeProfiles: Set<String> = [],
+        services: [String]? = nil,
+        follow: Bool = true,
+        tail: Int? = nil,
+        onLine: @escaping @Sendable (String, String) -> Void
+    ) async throws {
+        let included = services.map(Set.init)
+            ?? ComposeGraph.includedServices(project, activeProfiles: activeProfiles)
+        let containers = try await engine.listContainers()
+        let targets = project.serviceNames.filter(included.contains).compactMap { service in
+            Self.container(for: service, project: project, in: containers, domain: nil)
+                .map { (service: service, name: $0.id) }
+        }
+        guard !targets.isEmpty else { return }
+
+        let engine = self.engine
+        await withTaskGroup(of: Void.self) { group in
+            for target in targets {
+                group.addTask {
+                    _ = try? await engine.streamLogs(
+                        name: target.name, follow: follow, tail: tail
+                    ) { line in
+                        onLine(target.service, line)
+                    }
+                }
+            }
+        }
+    }
+
     /// Stream logs for a service (or the first service) — passthrough to `container logs`.
     @discardableResult
     public func logs(project: ComposeProject, service: String?, follow: Bool, tail: Int?) async throws -> Int32 {

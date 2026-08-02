@@ -17,6 +17,25 @@ final class FakeRunner: ProcessRunner, @unchecked Sendable {
         calls.append((executable, arguments))
         return inheritExit
     }
+
+    /// Lines a `stream` call emits, in order.
+    nonisolated(unsafe) var streamLines: [String] = []
+    func stream(
+        _ executable: String, _ arguments: [String],
+        onLine: @escaping @Sendable (String) -> Void
+    ) async throws -> Int32 {
+        calls.append((executable, arguments))
+        for line in streamLines { onLine(line) }
+        return inheritExit
+    }
+}
+
+/// Collects lines from a `@Sendable` callback.
+final class LineCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+    var lines: [String] { lock.withLock { storage } }
+    func append(_ line: String) { lock.withLock { storage.append(line) } }
 }
 
 @Suite("CLIContainerEngine")
@@ -98,6 +117,20 @@ struct CLIContainerEngineTests {
 
         let containers = try await engine.listContainers()
         #expect(containers == [ContainerSummary(id: "bare", image: "", state: "")])
+    }
+
+    @Test("streamLogs builds the follow argv and hands over each line")
+    func streamLogsArgv() async throws {
+        let runner = FakeRunner()
+        runner.streamLines = ["first", "second"]
+        let engine = CLIContainerEngine(runner: runner)
+
+        let collected = LineCollector()
+        _ = try await engine.streamLogs(name: "demo-web", follow: true, tail: 20) {
+            collected.append($0)
+        }
+        #expect(runner.calls[0].arguments == ["container", "logs", "-f", "-n", "20", "demo-web"])
+        #expect(collected.lines == ["first", "second"])
     }
 
     @Test("captured command non-zero exit throws EngineError with argv and stderr")

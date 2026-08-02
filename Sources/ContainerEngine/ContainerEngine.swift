@@ -119,4 +119,13 @@ public protocol ContainerEngine: Sendable {
     /// Every container the engine knows about, running or not, with its labels —
     /// the source for identifying a project's containers.
     func listContainers() async throws -> [ContainerSummary]
+    /// Stream a container's log lines as they arrive.
+    ///
+    /// `nonisolated` in the CLI implementation on purpose: a followed log lives as
+    /// long as the stack, and running it through the engine's serialized spawn path
+    /// would block every other engine call for that whole time.
+    nonisolated func streamLogs(
+        name: String, follow: Bool, tail: Int?,
+        onLine: @escaping @Sendable (String) -> Void
+    ) async throws -> Int32
 }

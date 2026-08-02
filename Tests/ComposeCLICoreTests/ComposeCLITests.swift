@@ -74,7 +74,7 @@ struct ComposeCLITests {
 
     @Test("no compose file in the working directory reports the candidates")
     func noComposeFile() async {
-        let run = await runCLI(["up"])
+        let run = await runCLI(["up", "-d"])
         #expect(run.exitCode == 1)
         #expect(run.stderr.contains("no compose file found in /work"))
         #expect(run.stderr.contains("docker-compose.yml"))
@@ -83,7 +83,7 @@ struct ComposeCLITests {
     @Test("the default lookup order finds compose.yaml first")
     func defaultLookup() async {
         let run = await runCLI(
-            ["up"],
+            ["up", "-d"],
             files: ["/work/compose.yaml": Self.stack, "/work/docker-compose.yml": "services: {}"])
         #expect(run.exitCode == 0)
         #expect(run.operations == ["run:demo-web", "run:demo-worker"])
@@ -93,7 +93,7 @@ struct ComposeCLITests {
 
     @Test("a .env beside the compose file supplies variables")
     func dotEnvIsRead() async {
-        let run = await runCLI(["up"], files: [
+        let run = await runCLI(["up", "-d"], files: [
             "/work/compose.yaml": """
                 name: demo
                 services:
@@ -120,16 +120,16 @@ struct ComposeCLITests {
                 """,
             "/work/.env": "TAG=from-dotenv\n",
         ]
-        let fromDotEnv = await runCLI(["up"], files: files)
+        let fromDotEnv = await runCLI(["up", "-d"], files: files)
         #expect(fromDotEnv.runInvocations.first?.contains("TAG=from-dotenv") == true)
 
-        let overridden = await runCLI(["up"], files: files, environment: ["TAG": "from-process"])
+        let overridden = await runCLI(["up", "-d"], files: files, environment: ["TAG": "from-process"])
         #expect(overridden.runInvocations.first?.contains("TAG=from-process") == true)
     }
 
     @Test("a variable with no value anywhere is a warning, not a failure")
     func unsetVariableWarnsButStarts() async {
-        let run = await runCLI(["up"], files: ["/work/compose.yaml": """
+        let run = await runCLI(["up", "-d"], files: ["/work/compose.yaml": """
             name: demo
             services:
               web:
@@ -141,7 +141,7 @@ struct ComposeCLITests {
 
     @Test("a required variable stops the command and names the key")
     func requiredVariableFails() async {
-        let run = await runCLI(["up"], files: ["/work/compose.yaml": """
+        let run = await runCLI(["up", "-d"], files: ["/work/compose.yaml": """
             name: demo
             services:
               db:
@@ -157,7 +157,7 @@ struct ComposeCLITests {
 
     @Test("no .env is not an error")
     func withoutDotEnv() async {
-        let run = await runCLI(["up"], files: Self.files)
+        let run = await runCLI(["up", "-d"], files: Self.files)
         #expect(run.exitCode == 0)
     }
 
@@ -165,10 +165,65 @@ struct ComposeCLITests {
 
     @Test("up starts the stack and reports the count")
     func upStartsStack() async {
-        let run = await runCLI(["up"], files: Self.files)
+        let run = await runCLI(["up", "-d"], files: Self.files)
         #expect(run.exitCode == 0)
         #expect(run.stdout == "Started 2 service(s).\n")
         #expect(run.operations == ["run:demo-web", "run:demo-worker"])
+    }
+
+    @Test("up follows the logs by default, then stops the stack when they end")
+    func upFollowsInForeground() async {
+        let engine = FakeEngine(logLines: ["demo-web": ["ready"], "demo-worker": ["tick"]])
+        let run = await runCLI(["up"], files: Self.files, engine: engine)
+        #expect(run.exitCode == 0)
+        #expect(run.stdout.contains("web    | ready\n"))
+        #expect(run.stdout.contains("worker | tick\n"))
+        #expect(run.stdout.contains("Stopping"))
+        // started, then stopped in reverse dependency order — not removed
+        #expect(run.operations == [
+            "run:demo-web", "run:demo-worker", "stop:demo-worker", "stop:demo-web",
+        ])
+    }
+
+    @Test("a service's lines come out in order, and none is dropped")
+    func multiplexerKeepsOrderAndLosesNothing() async {
+        // The multiplexer is fed from a reader thread per service with no yielding,
+        // which is where a per-line task would reorder and the process exit would
+        // truncate.
+        let lines = (0..<400).map { "web-\($0)" }
+        let other = (0..<400).map { "worker-\($0)" }
+        let engine = FakeEngine(
+            containers: [
+                composeContainer(project: "demo", service: "web"),
+                composeContainer(project: "demo", service: "worker"),
+            ],
+            logLines: ["demo-web": lines, "demo-worker": other])
+        let run = await runCLI(["logs"], files: Self.files, engine: engine)
+
+        let webLines = run.stdout.split(separator: "\n")
+            .filter { $0.hasPrefix("web ") }
+            .compactMap { line -> String? in
+                line.range(of: "| ").map { String(line[$0.upperBound...]) }
+            }
+        #expect(webLines.count == 400)
+        #expect(webLines == lines)
+        #expect(run.stdout.split(separator: "\n").filter { $0.hasPrefix("worker") }.count == 400)
+    }
+
+    @Test("-d starts the stack and returns without following anything")
+    func upDetachDoesNotFollow() async {
+        let engine = FakeEngine(logLines: ["demo-web": ["ready"]])
+        let run = await runCLI(["up", "-d"], files: Self.files, engine: engine)
+        #expect(run.stdout == "Started 2 service(s).\n")
+        #expect(run.operations == ["run:demo-web", "run:demo-worker"])
+    }
+
+    @Test("up does not attach when nothing is left running")
+    func upDoesNotAttachToADeadStack() async {
+        let run = await runCLI(
+            ["up"], files: Self.files, engine: FakeEngine(exiting: ["web", "worker"]))
+        #expect(run.exitCode == 1)
+        #expect(!run.stdout.contains("Stopping"))
     }
 
     @Test("up counts only profile-included services")
@@ -182,10 +237,10 @@ struct ComposeCLITests {
                 image: busybox
                 profiles: [dev]
             """]
-        let run = await runCLI(["up"], files: files)
+        let run = await runCLI(["up", "-d"], files: files)
         #expect(run.stdout == "Started 1 service(s).\n")
 
-        let withProfile = await runCLI(["--profile", "dev", "up"], files: files)
+        let withProfile = await runCLI(["--profile", "dev", "up", "-d"], files: files)
         #expect(withProfile.stdout == "Started 2 service(s).\n")
     }
 
@@ -194,7 +249,7 @@ struct ComposeCLITests {
         let engine = FakeEngine(containers: [
             composeContainer(project: "other", service: "www", name: "demo-web")
         ])
-        let run = await runCLI(["up"], files: Self.files, engine: engine)
+        let run = await runCLI(["up", "-d"], files: Self.files, engine: engine)
         #expect(run.exitCode == 1)
         #expect(run.stderr.contains("'demo-web' (service 'web') belongs to project 'other'"))
         #expect(run.operations.isEmpty)
@@ -205,7 +260,7 @@ struct ComposeCLITests {
         let engine = FakeEngine(containers: [
             ContainerSummary(id: "demo-web", image: "nginx", state: "running")
         ])
-        let run = await runCLI(["up"], files: Self.files, engine: engine)
+        let run = await runCLI(["up", "-d"], files: Self.files, engine: engine)
         #expect(run.exitCode == 1)
         #expect(run.stderr.contains("belongs to no compose project"))
         #expect(run.operations.isEmpty)
@@ -216,14 +271,14 @@ struct ComposeCLITests {
         let engine = FakeEngine(containers: [
             composeContainer(project: "demo", service: "web")
         ])
-        let run = await runCLI(["up"], files: Self.files, engine: engine)
+        let run = await runCLI(["up", "-d"], files: Self.files, engine: engine)
         #expect(run.exitCode == 0)
         #expect(run.operations.contains("rm:demo-web"))
     }
 
     @Test("up reports a service that started and died, and where to look")
     func upReportsExitedService() async {
-        let run = await runCLI(["up"], files: Self.files, engine: FakeEngine(exiting: ["worker"]))
+        let run = await runCLI(["up", "-d"], files: Self.files, engine: FakeEngine(exiting: ["worker"]))
         #expect(run.exitCode == 0)  // one service is still up
         #expect(run.stdout.contains("Started 1/2 service(s)."))
         #expect(run.stdout.contains("'worker' is not running. Check its log: container compose logs worker"))
@@ -232,14 +287,14 @@ struct ComposeCLITests {
     @Test("up fails when every service died")
     func upAllServicesDied() async {
         let run = await runCLI(
-            ["up"], files: Self.files, engine: FakeEngine(exiting: ["web", "worker"]))
+            ["up", "-d"], files: Self.files, engine: FakeEngine(exiting: ["web", "worker"]))
         #expect(run.exitCode == 1)
         #expect(run.stdout.contains("Started 0/2 service(s)."))
     }
 
     @Test("up reports a stopped container system without touching containers")
     func upSystemDown() async {
-        let run = await runCLI(["up"], files: Self.files, engine: FakeEngine(running: false))
+        let run = await runCLI(["up", "-d"], files: Self.files, engine: FakeEngine(running: false))
         #expect(run.exitCode == 1)
         #expect(run.stderr.contains("container system is not running"))
         #expect(run.operations.isEmpty)
@@ -247,7 +302,7 @@ struct ComposeCLITests {
 
     @Test("up refuses a service with neither image nor build")
     func upBlockingWarning() async {
-        let run = await runCLI(["up"], files: ["/work/compose.yaml": """
+        let run = await runCLI(["up", "-d"], files: ["/work/compose.yaml": """
             name: demo
             services:
               broken: {}
@@ -259,7 +314,7 @@ struct ComposeCLITests {
 
     @Test("up reports a dependency cycle")
     func upCycle() async {
-        let run = await runCLI(["up"], files: ["/work/compose.yaml": """
+        let run = await runCLI(["up", "-d"], files: ["/work/compose.yaml": """
             name: demo
             services:
               a:
@@ -277,7 +332,7 @@ struct ComposeCLITests {
 
     @Test("warning-level diagnostics go to stderr scoped by service; info stays hidden")
     func warningsOnStderr() async {
-        let run = await runCLI(["up"], files: ["/work/compose.yaml": """
+        let run = await runCLI(["up", "-d"], files: ["/work/compose.yaml": """
             name: demo
             services:
               web:
@@ -296,7 +351,7 @@ struct ComposeCLITests {
     @Test("a bind source that is a file is flagged before start")
     func bindFilePreflight() async {
         let run = await runCLI(
-            ["up"],
+            ["up", "-d"],
             files: [
                 "/work/compose.yaml": """
                     name: demo
@@ -362,11 +417,35 @@ struct ComposeCLITests {
         #expect(run.stdout.contains("No containers for demo."))
     }
 
-    @Test("logs defaults to the first service and passes --follow/--tail through")
-    func logsDefaults() async {
-        let run = await runCLI(["logs", "--follow", "--tail", "5"], files: Self.files)
+    @Test("logs for a named service passes --follow/--tail straight through")
+    func logsNamedService() async {
+        let run = await runCLI(["logs", "--follow", "--tail", "5", "web"], files: Self.files)
         #expect(run.exitCode == 0)
         #expect(run.operations == ["forward:logs -f -n 5 demo-web"])
+    }
+
+    @Test("logs with no service multiplexes every service under its own prefix")
+    func logsMultiplexesAllServices() async {
+        let engine = FakeEngine(
+            containers: [
+                composeContainer(project: "demo", service: "web"),
+                composeContainer(project: "demo", service: "worker"),
+            ],
+            logLines: ["demo-web": ["listening"], "demo-worker": ["polling"]])
+        let run = await runCLI(["logs"], files: Self.files, engine: engine)
+        #expect(run.exitCode == 0)
+        // padded to the widest service name, and never a torn line
+        #expect(run.stdout.contains("web    | listening\n"))
+        #expect(run.stdout.contains("worker | polling\n"))
+    }
+
+    @Test("multiplexed logs are colourless when stdout is not a terminal")
+    func logsNoColourWhenRedirected() async {
+        let engine = FakeEngine(
+            containers: [composeContainer(project: "demo", service: "web")],
+            logLines: ["demo-web": ["plain"]])
+        let redirected = await runCLI(["logs"], files: Self.files, engine: engine)
+        #expect(!redirected.stdout.contains("\u{1B}["))
     }
 
     @Test("logs for an unknown service fails")
@@ -545,10 +624,10 @@ struct ComposeCLITests {
                 image: nginx
                 ports: ["80:80"]
             """]
-        let quiet = await runCLI(["up"], files: files)
+        let quiet = await runCLI(["up", "-d"], files: files)
         #expect(!quiet.stderr.contains("privileged host port"))
 
-        let loud = await runCLI(["--verbose", "up"], files: files)
+        let loud = await runCLI(["--verbose", "up", "-d"], files: files)
         #expect(loud.stderr.contains("note: [web] Publishing privileged host port 80"))
     }
 

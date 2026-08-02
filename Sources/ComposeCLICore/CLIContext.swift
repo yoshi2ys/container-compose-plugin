@@ -24,6 +24,8 @@ public struct CLIContext: Sendable {
     /// Whether stdin is a terminal. `container exec -t` fails outright when it is
     /// not, so `exec` asks for a TTY only when there is one.
     public var isTTY: Bool
+    /// Whether stdout is a terminal; drives whether multiplexed logs are coloured.
+    public var isOutputTTY: Bool
 
     public init(
         arguments: [String],
@@ -34,7 +36,8 @@ public struct CLIContext: Sendable {
         readFile: @escaping @Sendable (String) throws -> String,
         makeEngine: @escaping @Sendable () -> any ContainerEngine,
         environment: [String: String] = [:],
-        isTTY: Bool = false
+        isTTY: Bool = false,
+        isOutputTTY: Bool = false
     ) {
         self.arguments = arguments
         self.currentDirectory = currentDirectory
@@ -45,6 +48,7 @@ public struct CLIContext: Sendable {
         self.makeEngine = makeEngine
         self.environment = environment
         self.isTTY = isTTY
+        self.isOutputTTY = isOutputTTY
     }
 
     /// The real process environment: `FileManager`, the standard streams, and the
@@ -64,7 +68,8 @@ public struct CLIContext: Sendable {
             readFile: { try String(contentsOfFile: $0, encoding: .utf8) },
             makeEngine: { CLIContainerEngine() },
             environment: ProcessInfo.processInfo.environment,
-            isTTY: isatty(STDIN_FILENO) == 1
+            isTTY: isatty(STDIN_FILENO) == 1,
+            isOutputTTY: isatty(STDOUT_FILENO) == 1
         )
     }
 }
