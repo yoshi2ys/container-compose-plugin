@@ -21,6 +21,9 @@ public struct CLIContext: Sendable {
     public var makeEngine: @Sendable () -> any ContainerEngine
     /// The process environment, the first source for `${…}` interpolation.
     public var environment: [String: String]
+    /// Whether stdin is a terminal. `container exec -t` fails outright when it is
+    /// not, so `exec` asks for a TTY only when there is one.
+    public var isTTY: Bool
 
     public init(
         arguments: [String],
@@ -30,7 +33,8 @@ public struct CLIContext: Sendable {
         pathKind: @escaping @Sendable (String) -> PathKind,
         readFile: @escaping @Sendable (String) throws -> String,
         makeEngine: @escaping @Sendable () -> any ContainerEngine,
-        environment: [String: String] = [:]
+        environment: [String: String] = [:],
+        isTTY: Bool = false
     ) {
         self.arguments = arguments
         self.currentDirectory = currentDirectory
@@ -40,6 +44,7 @@ public struct CLIContext: Sendable {
         self.readFile = readFile
         self.makeEngine = makeEngine
         self.environment = environment
+        self.isTTY = isTTY
     }
 
     /// The real process environment: `FileManager`, the standard streams, and the
@@ -58,7 +63,8 @@ public struct CLIContext: Sendable {
             },
             readFile: { try String(contentsOfFile: $0, encoding: .utf8) },
             makeEngine: { CLIContainerEngine() },
-            environment: ProcessInfo.processInfo.environment
+            environment: ProcessInfo.processInfo.environment,
+            isTTY: isatty(STDIN_FILENO) == 1
         )
     }
 }

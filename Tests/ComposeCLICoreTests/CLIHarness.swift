@@ -34,7 +34,8 @@ func runCLI(
     directories: Set<String> = [],
     currentDirectory: String = "/work",
     engine: FakeEngine = FakeEngine(),
-    environment: [String: String] = [:]
+    environment: [String: String] = [:],
+    isTTY: Bool = false
 ) async -> CLIRun {
     let sink = OutputSink()
     let context = CLIContext(
@@ -52,7 +53,8 @@ func runCLI(
             return contents
         },
         makeEngine: { engine },
-        environment: environment
+        environment: environment,
+        isTTY: isTTY
     )
     let code = await ComposeCLI.run(context)
     return CLIRun(

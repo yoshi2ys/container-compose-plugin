@@ -3,7 +3,7 @@ import Foundation
 /// The subcommands `container compose` accepts. Declaration order is the order
 /// they appear in `--help`.
 enum Command: String, CaseIterable {
-    case up, down, build, ps, logs
+    case up, down, start, stop, restart, build, pull, ps, logs, exec, config
 
     /// What this command takes and which options it accepts.
     ///
@@ -55,6 +55,63 @@ enum Command: String, CaseIterable {
                 discussion: "Shows the log of one service (the first one, when none is named).",
                 options: [.follow, .tail],
                 positionals: .atMostOne(name: "service"))
+        case .start:
+            return SubcommandSpec(
+                summary: "Start the stack's stopped containers",
+                discussion: """
+                    Starts the containers `up` created, in dependency order, without
+                    recreating them. Containers that are already running are left alone.
+                    """,
+                options: [],
+                positionals: .none(hint: "`start` starts the whole stack."))
+        case .stop:
+            return SubcommandSpec(
+                summary: "Stop the stack's containers without removing them",
+                discussion: """
+                    Stops the running containers in reverse dependency order and leaves
+                    them in place, so `start` can bring them back. Use `down` to remove them.
+                    """,
+                options: [],
+                positionals: .none(hint: "`stop` stops the whole stack."))
+        case .restart:
+            return SubcommandSpec(
+                summary: "Stop then start the stack's containers",
+                discussion: """
+                    Stops in reverse dependency order, then starts in dependency order, so
+                    a dependent is never running without its dependency. Does not recreate
+                    containers — use `up` to pick up compose file changes.
+                    """,
+                options: [],
+                positionals: .none(hint: "`restart` restarts the whole stack."))
+        case .pull:
+            return SubcommandSpec(
+                summary: "Pull the images services declare",
+                discussion: """
+                    Pulls the `image:` of every service, or only the named ones. Services
+                    that only have a `build:` section have nothing to pull; use `build`.
+                    """,
+                options: [],
+                positionals: .any(name: "service"))
+        case .exec:
+            return SubcommandSpec(
+                summary: "Run a command in a service's container",
+                discussion: """
+                    Runs the command in the running container of <service>, with this
+                    terminal attached. Everything after the service name is passed through
+                    untouched, so `exec web ls --all` reaches `ls`, not this parser.
+                    """,
+                options: [],
+                positionals: .verbatimAfterFirst(name: "service", rest: "command"))
+        case .config:
+            return SubcommandSpec(
+                summary: "Print the compose file with variables substituted",
+                discussion: """
+                    Prints the file as the rest of the commands read it, after `${…}`
+                    substitution, followed by every diagnostic — including the info-level
+                    ones the other commands keep quiet about.
+                    """,
+                options: [],
+                positionals: .none(hint: "`config` prints the whole file."))
         }
     }
 
@@ -64,6 +121,7 @@ enum Command: String, CaseIterable {
         case .none: return rawValue
         case .atMostOne(let name): return "\(rawValue) [\(name)]"
         case .any(let name): return "\(rawValue) [\(name)...]"
+        case .verbatimAfterFirst(let name, let rest): return "\(rawValue) <\(name)> <\(rest)>..."
         }
     }
 }
@@ -107,6 +165,9 @@ enum PositionalRule: Equatable {
     case none(hint: String)
     case atMostOne(name: String)
     case any(name: String)
+    /// One required operand, then everything else verbatim — option parsing stops
+    /// after the first, so the trailing words belong to the command being run.
+    case verbatimAfterFirst(name: String, rest: String)
 }
 
 /// A fully parsed and validated command line.
@@ -118,6 +179,8 @@ struct Invocation: Equatable {
     var follow = false
     var tail: Int?
     var noCache = false
+    /// Show `.info` diagnostics, which are otherwise kept out of the way.
+    var verbose = false
 }
 
 enum ParsedArguments: Equatable {
@@ -145,6 +208,7 @@ enum CommandLineParser {
         var follow = false
         var tail: Int?
         var noCache = false
+        var verbose = false
         var command: Command?
         var endOfOptions = false
 
@@ -178,6 +242,9 @@ enum CommandLineParser {
                         return .failure(missingValue(argument, "<name>", command))
                     }
                     profiles.insert(name)
+                    continue
+                case "--verbose":
+                    verbose = true
                     continue
                 default:
                     break
@@ -219,6 +286,11 @@ enum CommandLineParser {
                 command = parsed
             } else {
                 positionals.append(argument)
+                // `exec web ls --all`: `--all` is the inner command's, not ours.
+                if let command, case .verbatimAfterFirst = command.spec.positionals,
+                    positionals.count == 1 {
+                    endOfOptions = true
+                }
             }
         }
 
@@ -227,7 +299,7 @@ enum CommandLineParser {
 
         return .run(Invocation(
             command: command, file: file, profiles: profiles, positionals: positionals,
-            follow: follow, tail: tail, noCache: noCache))
+            follow: follow, tail: tail, noCache: noCache, verbose: verbose))
     }
 
     // MARK: - validation
@@ -246,6 +318,13 @@ enum CommandLineParser {
                 + "\(positionals.joined(separator: ", "))."
         case .any:
             return nil
+        case .verbatimAfterFirst(let name, let rest):
+            switch positionals.count {
+            case 0: return "`compose \(command.rawValue)` needs a \(name): compose \(command.synopsis)"
+            case 1: return "`compose \(command.rawValue) \(positionals[0])` needs a \(rest) to run: "
+                + "compose \(command.synopsis)"
+            default: return nil
+            }
         }
     }
 
@@ -297,6 +376,7 @@ enum CommandLineParser {
     private static let globalOptionRows: [(String, String)] = [
         ("-f, --file <file>", "Compose file (default: ./compose.yaml, compose.yml, docker-compose.yaml, docker-compose.yml)"),
         ("--profile <name>", "Activate a compose profile (repeatable)"),
+        ("--verbose", "Also show info-level diagnostics"),
         ("-h, --help", "Show this help"),
     ]
 

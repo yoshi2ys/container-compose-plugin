@@ -102,7 +102,23 @@ public actor FakeEngine: ContainerEngine {
         return states.isEmpty ? ContainerState(running: false) : states.removeFirst()
     }
 
-    public func stop(name: String, timeout: Int?) async throws { operations.append("stop:\(name)") }
+    public func stop(name: String, timeout: Int?) async throws {
+        operations.append("stop:\(name)")
+        setState(of: name, to: "stopped")
+    }
+
+    public func start(name: String) async throws {
+        operations.append("start:\(name)")
+        setState(of: name, to: "running")
+    }
+
+    private func setState(of name: String, to state: String) {
+        guard let index = containers.firstIndex(where: { $0.id == name }) else { return }
+        let existing = containers[index]
+        containers[index] = ContainerSummary(
+            id: existing.id, image: existing.image, state: state,
+            labels: existing.labels, ports: existing.ports)
+    }
 
     public func remove(name: String, force: Bool) async throws {
         operations.append("rm:\(name)")

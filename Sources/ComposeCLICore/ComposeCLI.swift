@@ -40,20 +40,24 @@ public enum ComposeCLI {
         // Every command reads the compose file: it names the project whose
         // containers the command acts on, `ps` and `down` included.
         let loaded = try loadProject(file: invocation.file, context: context)
+        // What the file itself is wrong about matters to every command, not just the
+        // ones that start containers. `config` prints its own aggregate below.
+        if invocation.command != .config {
+            printWarnings(loaded.warnings, context, verbose: invocation.verbose)
+        }
 
         switch invocation.command {
         case .up:
-            printWarnings(loaded.warnings, context)
             let included = ComposeGraph.includedServices(loaded.project, activeProfiles: profiles)
             printWarnings(
                 preflight(
                     project: loaded.project, baseDirectory: loaded.baseDirectory,
                     services: included, context: context),
-                context)
+                context, verbose: invocation.verbose)
             let options = TranslateOptions(baseDirectory: loaded.baseDirectory)
             let result = try await orchestrator.up(
                 project: loaded.project, activeProfiles: profiles, options: options)
-            printWarnings(result.warnings, context)
+            printWarnings(result.warnings, context, verbose: invocation.verbose)
             return report(result, context)
 
         case .down:
@@ -65,7 +69,6 @@ public enum ComposeCLI {
             return 0
 
         case .build:
-            printWarnings(loaded.warnings, context)
             for service in invocation.positionals where loaded.project.services[service] == nil {
                 return fail("no such service: \(service)", context)
             }
@@ -102,27 +105,110 @@ public enum ComposeCLI {
             return try await orchestrator.logs(
                 project: loaded.project, service: service,
                 follow: invocation.follow, tail: invocation.tail)
+
+        case .stop:
+            let stopped = try await orchestrator.stop(project: loaded.project, activeProfiles: profiles)
+            context.write(count(stopped, "Stopped", "stop", loaded.project))
+            return 0
+
+        case .start:
+            let started = try await orchestrator.start(project: loaded.project, activeProfiles: profiles)
+            context.write(count(started, "Started", "start", loaded.project))
+            return 0
+
+        case .restart:
+            let restarted = try await orchestrator.restart(
+                project: loaded.project, activeProfiles: profiles)
+            context.write(count(restarted, "Restarted", "restart", loaded.project))
+            return 0
+
+        case .pull:
+            for service in invocation.positionals where loaded.project.services[service] == nil {
+                return fail("no such service: \(service)", context)
+            }
+            let pulled = try await orchestrator.pull(
+                project: loaded.project, services: invocation.positionals)
+            context.write(pulled.isEmpty
+                ? (invocation.positionals.isEmpty
+                    ? "No services declare an image to pull.\n"
+                    : "No image to pull among: \(invocation.positionals.joined(separator: ", ")).\n")
+                : "Pulled \(pulled.count) image(s).\n")
+            return 0
+
+        case .exec:
+            let service = invocation.positionals[0]
+            guard loaded.project.services[service] != nil else {
+                return fail("no such service: \(service)", context)
+            }
+            return try await orchestrator.exec(
+                project: loaded.project, service: service,
+                command: Array(invocation.positionals.dropFirst()), tty: context.isTTY)
+
+        case .config:
+            let document = try ComposeParser.interpolatedDocument(
+                loaded.yaml,
+                projectNameFallback: ComposeNaming.projectName(loaded.project),
+                environment: loaded.environment)
+            context.write(document)
+            // `config` is where you go to find out why something was ignored, so it
+            // gathers every diagnostic the pipeline can produce — parsing, preflight
+            // and translation — at every severity, info included.
+            let options = TranslateOptions(baseDirectory: loaded.baseDirectory)
+            var diagnostics = loaded.warnings
+            diagnostics += preflight(
+                project: loaded.project, baseDirectory: loaded.baseDirectory,
+                services: Set(loaded.project.serviceNames), context: context)
+            diagnostics += loaded.project.serviceNames.flatMap {
+                ComposeTranslate.runArgs(serviceName: $0, project: loaded.project, options: options)
+                    .warnings
+            }
+            // A dependency `up` would refuse to resolve is exactly the kind of thing
+            // `config` exists to surface.
+            if case .failure(let error) = ComposeGraph.startupPlan(
+                loaded.project, activeProfiles: profiles) {
+                diagnostics.append(Warning(
+                    kind: .unsupportedValue, key: "depends_on",
+                    message: "dependency error: \(error)", severity: .blocking))
+            }
+            printWarnings(diagnostics.sortedForDisplay(), context, verbose: true)
+            return diagnostics.contains { $0.severity == .blocking } ? 1 : 0
         }
+    }
+
+    /// "Stopped 3 container(s) in demo." / "No containers to stop in demo."
+    private static func count(
+        _ names: [String], _ past: String, _ verb: String, _ project: ComposeProject
+    ) -> String {
+        let name = ComposeNaming.projectName(project)
+        guard !names.isEmpty else { return "No containers to \(verb) in \(name).\n" }
+        return "\(past) \(names.count) container(s) in \(name).\n"
     }
 
     // MARK: - helpers
 
-    static func loadProject(
-        file: String?, context: CLIContext
-    ) throws -> (project: ComposeProject, warnings: [Warning], baseDirectory: String) {
+    struct LoadedProject {
+        let project: ComposeProject
+        let warnings: [Warning]
+        let baseDirectory: String
+        /// The file as read, for `config` to re-render without resolving the path again.
+        let yaml: String
+        let environment: (String) -> String?
+    }
+
+    static func loadProject(file: String?, context: CLIContext) throws -> LoadedProject {
         let path = try resolveFile(file, context: context)
         let yaml = try context.readFile(path)
         // Absolute dir of the compose file; relative build/bind/env_file paths resolve
         // against this (Compose semantics), so `up` works regardless of the shell CWD.
         let directory = URL(fileURLWithPath: path).deletingLastPathComponent()
         let dotEnv = try loadDotEnv(directory: directory.path, context: context)
+        // The process environment wins over `.env`, as in Compose.
+        let environment = { (name: String) in context.environment[name] ?? dotEnv[name] }
         let result = try ComposeParser.parse(
-            yaml, projectNameFallback: directory.lastPathComponent
-        ) { name in
-            // The process environment wins over `.env`, as in Compose.
-            context.environment[name] ?? dotEnv[name]
-        }
-        return (result.project, result.warnings, directory.path)
+            yaml, projectNameFallback: directory.lastPathComponent, environment: environment)
+        return LoadedProject(
+            project: result.project, warnings: result.warnings, baseDirectory: directory.path,
+            yaml: yaml, environment: environment)
     }
 
     /// The `.env` beside the compose file, if there is one. A file that exists but
@@ -170,10 +256,16 @@ public enum ComposeCLI {
             "no compose file found in \(context.currentDirectory) (looked for \(candidates.joined(separator: ", ")))")
     }
 
-    private static func printWarnings(_ warnings: [Warning], _ context: CLIContext) {
-        for warning in warnings where warning.severity != .info {
+    /// `.info` diagnostics are noise in a normal run and the reason for a surprise in
+    /// a bad one, so they are hidden unless asked for — by `--verbose`, or by `config`,
+    /// whose whole job is to explain what happened to the file.
+    private static func printWarnings(
+        _ warnings: [Warning], _ context: CLIContext, verbose: Bool = false
+    ) {
+        for warning in warnings where verbose || warning.severity != .info {
             let scope = warning.service.map { "[\($0)] " } ?? ""
-            context.writeError("warning: \(scope)\(warning.message)\n")
+            let label = warning.severity == .info ? "note" : "warning"
+            context.writeError("\(label): \(scope)\(warning.message)\n")
         }
     }
 

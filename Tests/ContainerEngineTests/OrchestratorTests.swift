@@ -387,8 +387,9 @@ struct OrchestratorTests {
             composeContainer(project: "demo", service: "web"),
         ])
         let removed = try await ComposeOrchestrator(engine: mock).down(project: proj)
-        // the service the file still defines first, the stranded one after.
-        #expect(removed == ["demo-api", "demo-web"])
+        // The stranded container goes first on this reverse pass: nothing in the file
+        // depends on it, but it may depend on a service the file still describes.
+        #expect(removed == ["demo-web", "demo-api"])
     }
 
     @Test("down leaves other projects and unlabelled containers alone")
@@ -402,6 +403,101 @@ struct OrchestratorTests {
         ])
         let removed = try await ComposeOrchestrator(engine: mock).down(project: proj)
         #expect(removed == ["demo-web"])
+    }
+
+    @Test("stop and start skip a service the active profiles exclude")
+    func lifecycleRespectsProfiles() async throws {
+        let proj = try project("""
+        name: demo
+        services:
+          db:
+            image: x
+          web:
+            image: x
+            depends_on: [db]
+          debug:
+            image: x
+            profiles: [debug]
+            depends_on: [db]
+        """)
+        let mock = FakeEngine()
+        await mock.setContainers([
+            composeContainer(project: "demo", service: "db", state: "stopped"),
+            composeContainer(project: "demo", service: "web", state: "stopped"),
+            composeContainer(project: "demo", service: "debug", state: "stopped"),
+        ])
+        // `up` with no profile would not start `debug`, so neither does `start`.
+        let started = try await ComposeOrchestrator(engine: mock).start(project: proj)
+        #expect(started == ["demo-db", "demo-web"])
+    }
+
+    @Test("stop covers a profile-excluded service, which start would have left alone")
+    func stopCoversExcludedServices() async throws {
+        let proj = try project("""
+        name: demo
+        services:
+          db:
+            image: x
+          debug:
+            image: x
+            profiles: [debug]
+            depends_on: [db]
+        """)
+        let mock = FakeEngine()
+        await mock.setContainers([
+            composeContainer(project: "demo", service: "db"),
+            composeContainer(project: "demo", service: "debug"),
+        ])
+        // Started with `--profile debug`; without it, `stop` still has to reach it,
+        // or the container is left running with no command that will stop it.
+        let stopped = try await ComposeOrchestrator(engine: mock).stop(project: proj)
+        #expect(stopped == ["demo-debug", "demo-db"])
+    }
+
+    @Test("restart puts back exactly what it took down, profiles included")
+    func restartIsSymmetric() async throws {
+        let proj = try project("""
+        name: demo
+        services:
+          db:
+            image: x
+          debug:
+            image: x
+            profiles: [debug]
+            depends_on: [db]
+        """)
+        let mock = FakeEngine()
+        await mock.setContainers([
+            composeContainer(project: "demo", service: "db"),
+            composeContainer(project: "demo", service: "debug"),
+        ])
+        let restarted = try await ComposeOrchestrator(engine: mock).restart(project: proj)
+        #expect(restarted == ["demo-db", "demo-debug"])
+        #expect(await mock.operations == [
+            "stop:demo-debug", "stop:demo-db", "start:demo-db", "start:demo-debug",
+        ])
+    }
+
+    @Test("stop unwinds a service that is gone from the file before the ones that remain")
+    func stopOrphansFirst() async throws {
+        let proj = try project("""
+        name: demo
+        services:
+          db:
+            image: x
+          web:
+            image: x
+            depends_on: [db]
+        """)
+        let mock = FakeEngine()
+        await mock.setContainers([
+            composeContainer(project: "demo", service: "db"),
+            composeContainer(project: "demo", service: "web"),
+            // left from a service that has since been deleted; it may still depend on db
+            composeContainer(project: "demo", service: "gone"),
+        ])
+        let stopped = try await ComposeOrchestrator(engine: mock).stop(project: proj)
+        #expect(stopped == ["demo-gone", "demo-web", "demo-db"])
     }
 
     @Test("down refuses when the system is not running")
