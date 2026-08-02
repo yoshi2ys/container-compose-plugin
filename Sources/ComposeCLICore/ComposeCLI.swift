@@ -119,8 +119,11 @@ public enum ComposeCLI {
         return (result.project, result.warnings, directory.path)
     }
 
-    /// Filesystem preflight: flag bind sources that point at a file (Apple `container`
-    /// bind-mounts directories only). Restricted to `services` (the profile-included set).
+    /// Preflight on bind mounts: a source that points at a file (Apple `container`
+    /// bind-mounts directories only), and a target at a database data directory
+    /// (the engine rejects the `chown` those images perform). Restricted to
+    /// `services` — the profile-included set — so `up --profile …` stays quiet
+    /// about services it will not start.
     private static func preflight(
         project: ComposeProject, baseDirectory: String, services: Set<String>, context: CLIContext
     ) -> [Warning] {
