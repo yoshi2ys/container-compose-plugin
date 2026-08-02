@@ -89,6 +89,78 @@ struct ComposeCLITests {
         #expect(run.operations == ["run:demo-web", "run:demo-worker"])
     }
 
+    // MARK: - variables
+
+    @Test("a .env beside the compose file supplies variables")
+    func dotEnvIsRead() async {
+        let run = await runCLI(["up"], files: [
+            "/work/compose.yaml": """
+                name: demo
+                services:
+                  web:
+                    image: nginx:${TAG}
+                """,
+            "/work/.env": "TAG=1.25\n",
+        ])
+        #expect(run.exitCode == 0)
+        #expect(run.runInvocations.first?.contains("nginx:1.25") == true)
+        #expect(!run.stderr.contains("not set"))
+    }
+
+    @Test("the process environment wins over .env")
+    func processEnvironmentWins() async {
+        let files = [
+            "/work/compose.yaml": """
+                name: demo
+                services:
+                  web:
+                    image: nginx
+                    environment:
+                      TAG: ${TAG}
+                """,
+            "/work/.env": "TAG=from-dotenv\n",
+        ]
+        let fromDotEnv = await runCLI(["up"], files: files)
+        #expect(fromDotEnv.runInvocations.first?.contains("TAG=from-dotenv") == true)
+
+        let overridden = await runCLI(["up"], files: files, environment: ["TAG": "from-process"])
+        #expect(overridden.runInvocations.first?.contains("TAG=from-process") == true)
+    }
+
+    @Test("a variable with no value anywhere is a warning, not a failure")
+    func unsetVariableWarnsButStarts() async {
+        let run = await runCLI(["up"], files: ["/work/compose.yaml": """
+            name: demo
+            services:
+              web:
+                image: nginx:${TAG}
+            """])
+        #expect(run.exitCode == 0)
+        #expect(run.stderr.contains("The 'TAG' variable is not set"))
+    }
+
+    @Test("a required variable stops the command and names the key")
+    func requiredVariableFails() async {
+        let run = await runCLI(["up"], files: ["/work/compose.yaml": """
+            name: demo
+            services:
+              db:
+                image: mysql
+                environment:
+                  MYSQL_ROOT_PASSWORD: ${ROOT_PASSWORD:?put it in .env}
+            """])
+        #expect(run.exitCode == 1)
+        #expect(run.stderr.contains("services.db.environment.MYSQL_ROOT_PASSWORD"))
+        #expect(run.stderr.contains("required variable 'ROOT_PASSWORD' is missing: put it in .env"))
+        #expect(run.operations.isEmpty)
+    }
+
+    @Test("no .env is not an error")
+    func withoutDotEnv() async {
+        let run = await runCLI(["up"], files: Self.files)
+        #expect(run.exitCode == 0)
+    }
+
     // MARK: - up
 
     @Test("up starts the stack and reports the count")
