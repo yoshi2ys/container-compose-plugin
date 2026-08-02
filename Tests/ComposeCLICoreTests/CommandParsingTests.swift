@@ -31,8 +31,8 @@ struct CommandParsingTests {
         }
     }
 
-    /// …and rejects the ones it does not, instead of ignoring them. This is the
-    /// pairing that used to fail silently: every flag was accepted by every command.
+    /// …and rejects the ones it does not, instead of ignoring them. This pairing is
+    /// the point of the spec table: a flag is legal for exactly the commands that list it.
     @Test("undeclared options are rejected", arguments: Command.allCases)
     func undeclaredOptionsRejected(command: Command) {
         let declared = Set(command.spec.options)
@@ -133,6 +133,16 @@ struct CommandParsingTests {
     func doubleDashPassthrough() {
         #expect(invocation(["build", "--", "--no-cache"])?.positionals == ["--no-cache"])
         #expect(invocation(["build", "--", "--no-cache"])?.noCache == false)
+        #expect(invocation(["logs", "--", "-h"])?.positionals == ["-h"])
+    }
+
+    @Test("`--` before the subcommand still leaves the subcommand recognizable")
+    func doubleDashBeforeCommand() {
+        // Scripts prepend `--` defensively before forwarding "$@"; `--` ends option
+        // parsing, it does not consume the operand that names the command.
+        #expect(invocation(["--", "up"])?.command == .up)
+        #expect(invocation(["--profile", "dev", "--", "logs", "web"])?.positionals == ["web"])
+        #expect(failure(["--", "--tail"])?.hasPrefix("Unknown command '--tail'.") == true)
     }
 
     @Test("`--help` after a command shows that command's help", arguments: Command.allCases)

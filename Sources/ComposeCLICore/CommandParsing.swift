@@ -160,60 +160,58 @@ enum CommandLineParser {
             defer { index += 1 }
             let argument = arguments[index]
 
-            if endOfOptions {
-                positionals.append(argument)
-                continue
-            }
-
-            switch argument {
-            case "--":
-                endOfOptions = true
-                continue
-            case "-h", "--help":
-                return .help(command.map(help(for:)) ?? usage)
-            case "-f", "--file":
-                guard let path = nextValue() else {
-                    return .failure(missingValue(argument, "<file>", command))
-                }
-                file = path
-                continue
-            case "--profile":
-                guard let name = nextValue() else {
-                    return .failure(missingValue(argument, "<name>", command))
-                }
-                profiles.insert(name)
-                continue
-            default:
-                break
-            }
-
-            if argument.hasPrefix("-") {
-                guard let command else {
-                    return .failure("Unknown option '\(argument)'.\n\n\(usage)")
-                }
-                guard let option = CommandOption(rawValue: argument),
-                    command.spec.options.contains(option)
-                else {
-                    return .failure(unknownOption(argument, command))
-                }
-                switch option {
-                case .follow:
-                    follow = true
-                case .noCache:
-                    noCache = true
-                case .tail:
-                    guard let raw = nextValue() else {
-                        return .failure(missingValue(argument, "<n>", command))
+            if !endOfOptions {
+                switch argument {
+                case "--":
+                    endOfOptions = true
+                    continue
+                case "-h", "--help":
+                    return .help(command.map(help(for:)) ?? usage)
+                case "-f", "--file":
+                    guard let path = nextValue() else {
+                        return .failure(missingValue(argument, "<file>", command))
                     }
-                    guard let count = Int(raw), count >= 0 else {
-                        return .failure(
-                            "Invalid value for --tail: '\(raw)' (expected a non-negative integer).")
+                    file = path
+                    continue
+                case "--profile":
+                    guard let name = nextValue() else {
+                        return .failure(missingValue(argument, "<name>", command))
                     }
-                    tail = count
+                    profiles.insert(name)
+                    continue
+                default:
+                    break
                 }
-                continue
+
+                if argument.hasPrefix("-") {
+                    guard let command else {
+                        return .failure("Unknown option '\(argument)'.\n\n\(usage)")
+                    }
+                    guard let option = CommandOption(rawValue: argument),
+                        command.spec.options.contains(option)
+                    else {
+                        return .failure(unknownOption(argument, command))
+                    }
+                    switch option {
+                    case .follow:
+                        follow = true
+                    case .noCache:
+                        noCache = true
+                    case .tail:
+                        guard let raw = nextValue() else {
+                            return .failure(missingValue(argument, "<n>", command))
+                        }
+                        guard let count = Int(raw), count >= 0 else {
+                            return .failure(
+                                "Invalid value for --tail: '\(raw)' (expected a non-negative integer).")
+                        }
+                        tail = count
+                    }
+                    continue
+                }
             }
 
+            // A bare word, or anything after `--`: the subcommand, then its operands.
             if command == nil {
                 guard let parsed = Command(rawValue: argument) else {
                     return .failure("Unknown command '\(argument)'.\n\n\(usage)")
