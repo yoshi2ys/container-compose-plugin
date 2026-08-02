@@ -21,6 +21,7 @@ public struct Warning: Sendable, Hashable {
         case privilegedPort
         case tmpfsSize
         case bindFileNotDirectory
+        case bindChownRestricted
     }
 
     public enum Kind: Sendable, Hashable {

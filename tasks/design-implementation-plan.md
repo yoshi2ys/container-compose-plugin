@@ -145,8 +145,8 @@ Compose 仕様の interpolation を、YAML パース後・モデルデコード�
 
 Apple container の bind mount(virtiofs)は書き込みは通るが所有権変更を拒否するため、root で datadir を chown する公式 DB イメージの entrypoint が `Operation not permitted` の1行で落ちる。`preflightWarnings` に検出を追加する。
 
-- 条件: bind mount の target が既知 datadir テーブルに一致 **かつ** `user:` 未指定。
-- テーブル(定数、テストで網羅): `/var/lib/mysql`, `/var/lib/postgresql/data`, `/var/lib/mongodb`, `/data`。`/bitnami` 前置も許容。
+- 条件: bind mount の target が既知 datadir テーブルに一致 **かつ** 非 root の `user:` が未指定(`user: "0"` / `root` は entrypoint の chown 分岐が `id -u` = 0 で走るため回避策にならない)。
+- テーブル(定数、テストで網羅): `/var/lib/mysql`, `/var/lib/postgresql/data`, `/var/lib/mongodb`, `/data`, `/data/db`, `/data/configdb`(後2つは mongo image が宣言するパス)。`/bitnami` 前置も許容。target は字句正規化してから照合する。
 - 文面は断定しない(chown しない image では誤検出のため): 「Apple container の bind mount は chown を受け付けないため、root で datadir を chown する entrypoint(公式 mysql / mariadb / postgres 等)は**起動に失敗する可能性が高い**」+ 回避策2つ — named volume 化(entrypoint がそのまま動き初回初期化も効く)/ entrypoint 上書き(初回初期化が走らない旨も併記)。
 - warning kind: `.engineGap(.bindChownRestricted)`。
 - この検出は target パスと `user:` だけで決まる純粋判定 — FS probe は不要で、既存の `preflightWarnings` に素直に足せる。

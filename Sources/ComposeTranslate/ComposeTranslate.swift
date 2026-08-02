@@ -219,10 +219,14 @@ public enum ComposeTranslate {
 
     // MARK: preflight
 
-    /// Filesystem-dependent checks run before `up`. `kind` probes a path's type so
-    /// this stays pure (the CLI injects a `FileManager` probe; tests inject a fake).
-    /// Flags bind sources that point at a file — Apple `container` bind-mounts
-    /// directories only, and would otherwise fail with a cryptic "not a directory".
+    /// Checks run before `up` against the bind mounts a service declares. `kind`
+    /// probes a path's type so this stays pure (the CLI injects a `FileManager`
+    /// probe; tests inject a fake).
+    ///
+    /// Two things are flagged: a bind source that points at a file — Apple
+    /// `container` bind-mounts directories only, and would otherwise fail with a
+    /// cryptic "not a directory" — and a bind mount at a database data directory,
+    /// where the engine's refusal to honor `chown` kills the image's entrypoint.
     /// `services`, when non-nil, restricts the check to those service names — pass the
     /// profile-included set so `up --profile …` doesn't warn about services it won't start.
     public static func preflightWarnings(
@@ -235,15 +239,67 @@ public enum ComposeTranslate {
         for name in project.serviceNames where services?.contains(name) ?? true {
             guard let svc = project.services[name] else { continue }
             for volume in svc.volumes {
-                guard case .bind(let source, _, _) = volume else { continue }
-                guard kind(resolvePath(source, relativeTo: options.baseDirectory)) == .file else { continue }
-                warnings.append(Warning(
-                    kind: .engineGap(.bindFileNotDirectory), service: name, key: "volumes",
-                    message: "Bind source '\(source)' is a file; Apple container bind-mounts directories only — mount its parent directory instead.",
-                    severity: .warning))
+                guard case .bind(let source, let target, _) = volume else { continue }
+                if kind(resolvePath(source, relativeTo: options.baseDirectory)) == .file {
+                    // The mount cannot work at all, so what the image would do with the
+                    // directory is moot; one diagnosis beats two.
+                    warnings.append(Warning(
+                        kind: .engineGap(.bindFileNotDirectory), service: name, key: "volumes",
+                        message: "Bind source '\(source)' is a file; Apple container bind-mounts directories only — mount its parent directory instead.",
+                        severity: .warning))
+                } else if let warning = chownWarning(
+                    service: name, source: source, target: target, user: svc.user) {
+                    warnings.append(warning)
+                }
             }
         }
         return warnings.sortedForDisplay()
+    }
+
+    /// Container paths whose images conventionally `chown` the directory as root
+    /// during first-run initialization. These are the paths the *images* declare —
+    /// `mongo` uses `/data/db`, not the Debian package's `/var/lib/mongodb`, so both
+    /// are listed.
+    static let databaseDataDirectories: Set<String> = [
+        "/var/lib/mysql",
+        "/var/lib/postgresql/data",
+        "/var/lib/mongodb",
+        "/data",
+        "/data/db",
+        "/data/configdb",
+    ]
+
+    /// Apple `container`'s bind mounts (virtiofs) accept writes but reject ownership
+    /// changes, so an image that chowns its data directory as root dies on the first
+    /// line of its entrypoint with a bare `Operation not permitted`.
+    ///
+    /// Decided by the mount target and `user:` alone — no filesystem probe. The
+    /// wording stays conditional on purpose: plenty of images mount these paths
+    /// without ever calling `chown`, and this cannot tell them apart.
+    static func chownWarning(service: String, source: String, target: String, user: String?) -> Warning? {
+        // Only a *non-root* user avoids the chown. The official entrypoints guard it
+        // with `[ "$(id -u)" = "0" ]`, so `user: "0"` or `user: root` fails identically.
+        if let uid = user?.split(separator: ":").first.map(String.init),
+            !uid.isEmpty, uid != "0", uid != "root" {
+            return nil
+        }
+        // Lexical normalization only (no filesystem access), so `/var/lib/mysql/`,
+        // `//var/lib/mysql` and `/var//lib/mysql` all reach the same key.
+        let path = URL(fileURLWithPath: target).standardizedFileURL.path
+        guard databaseDataDirectories.contains(path)
+            || path == "/bitnami" || path.hasPrefix("/bitnami/")
+        else { return nil }
+        return Warning(
+            kind: .engineGap(.bindChownRestricted), service: service, key: "volumes",
+            message: """
+                Bind mount '\(source)' at '\(target)' is a conventional database data directory, and Apple container's \
+                bind mounts reject chown. An image whose entrypoint chowns that directory as root — the \
+                official mysql, mariadb and postgres images do — is likely to fail on startup with \
+                'Operation not permitted'. Either mount a named volume there instead (the entrypoint then \
+                works unchanged, first-run initialization included), or override the entrypoint (first-run \
+                initialization will not run).
+                """,
+            severity: .warning)
     }
 
     // MARK: helpers

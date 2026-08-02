@@ -151,6 +151,7 @@ These are surfaced as warnings at `up` time:
 | multiple `networks` per service | Only the first network is attached; the rest are warned |
 | port ranges | Single ports only |
 | bind mounts | Directories only (files are flagged); may be read-only for non-root container users |
+| bind mounts at a database data directory | Writes go through but `chown` does not, so the official mysql / mariadb / postgres entrypoints die on `Operation not permitted`. Flagged before `up`, with both ways out: a named volume (keeps first-run initialization) or an overridden entrypoint (skips it) |
 | privileged host ports (<1024) | May require elevated permissions on macOS |
 
 `down` removes containers only — networks and named volumes are left in place, so
