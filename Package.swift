@@ -51,9 +51,15 @@ let package = Package(
             dependencies: ["ComposeModel", "ComposeGraph", "ComposeTranslate"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        .target(
+            name: "EngineTestSupport",
+            dependencies: ["ContainerEngine", "ComposeTranslate"],
+            path: "Tests/EngineTestSupport",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
         .testTarget(
             name: "ContainerEngineTests",
-            dependencies: ["ContainerEngine", "ComposeModel"],
+            dependencies: ["ContainerEngine", "ComposeModel", "EngineTestSupport"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .target(
@@ -63,7 +69,7 @@ let package = Package(
         ),
         .testTarget(
             name: "ComposeCLICoreTests",
-            dependencies: ["ComposeCLICore", "ComposeModel", "ContainerEngine"],
+            dependencies: ["ComposeCLICore", "ComposeModel", "ContainerEngine", "EngineTestSupport"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .executableTarget(

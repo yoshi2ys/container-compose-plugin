@@ -1,3 +1,4 @@
+import ComposeTranslate
 import Foundation
 
 /// A `container` operation failed (non-zero exit). Carries enough to reproduce
@@ -23,6 +24,62 @@ public struct ContainerState: Sendable, Equatable {
         self.running = running
         self.exitCode = exitCode
     }
+}
+
+/// A host port published by a container, as reported by `container list`.
+public struct PublishedPort: Sendable, Equatable, CustomStringConvertible {
+    public let hostAddress: String?
+    public let hostPort: Int
+    public let containerPort: Int
+    public let proto: String?
+
+    public init(hostAddress: String? = nil, hostPort: Int, containerPort: Int, proto: String? = nil) {
+        self.hostAddress = hostAddress
+        self.hostPort = hostPort
+        self.containerPort = containerPort
+        self.proto = proto
+    }
+
+    /// Docker-style rendering, e.g. `0.0.0.0:8080->80/tcp`.
+    public var description: String {
+        let host = hostAddress.map { "\($0):" } ?? ""
+        let suffix = proto.map { "/\($0)" } ?? ""
+        return "\(host)\(hostPort)->\(containerPort)\(suffix)"
+    }
+}
+
+/// One container as listed by the engine. `labels` is what makes this useful:
+/// it carries `com.composeforcontainer.project` / `.service` for the containers
+/// this plugin created, which is how a stack is identified — the name is only a
+/// display and DNS attribute.
+public struct ContainerSummary: Sendable, Equatable {
+    /// The container's id, which for Apple `container` is also its name.
+    public let id: String
+    public let image: String
+    public let state: String
+    public let labels: [String: String]
+    public let ports: [PublishedPort]
+
+    public init(
+        id: String, image: String, state: String,
+        labels: [String: String] = [:], ports: [PublishedPort] = []
+    ) {
+        self.id = id
+        self.image = image
+        self.state = state
+        self.labels = labels
+        self.ports = ports
+    }
+
+    /// `container` reports `running` for a live container; anything else (stopped,
+    /// created, …) is not running.
+    public var isRunning: Bool { state.lowercased() == "running" }
+
+    /// The compose project that owns this container, `nil` if it carries no
+    /// compose labels (created by hand, or by the engine itself).
+    public var composeProject: String? { labels[ComposeLabels.project] }
+    /// The service this container implements, within `composeProject`.
+    public var composeService: String? { labels[ComposeLabels.service] }
 }
 
 /// Semantic operations against the container runtime. The CLI implementation
@@ -57,4 +114,7 @@ public protocol ContainerEngine: Sendable {
     func remove(name: String, force: Bool) async throws
     /// Run a `container` subcommand with inherited stdio (e.g. `ps`, `logs`); returns exit code.
     func forward(argv: [String]) async throws -> Int32
+    /// Every container the engine knows about, running or not, with its labels —
+    /// the source for identifying a project's containers.
+    func listContainers() async throws -> [ContainerSummary]
 }
