@@ -74,14 +74,14 @@ public enum ComposeTranslate {
                 kind: .unsupportedValue, service: serviceName,
                 message: "Service '\(serviceName)' not found.", severity: .blocking)])
         }
-        let projectName = project.name ?? "compose"
+        let projectName = ComposeNaming.projectName(project)
         var argv: [String] = ["run"]
         var warnings: [Warning] = []
 
         if options.detach { argv += ["-d"] }
         if options.removeOnExit { argv += ["--rm"] }
 
-        argv += ["--name", svc.containerName ?? "\(projectName)-\(serviceName)"]
+        argv += ["--name", ComposeNaming.containerName(project: project, service: serviceName, domain: nil)]
         if let cid = options.cidfilePath { argv += ["--cidfile", cid] }
 
         argv += ["--label", "\(ComposeLabels.project)=\(projectName)"]
@@ -136,7 +136,7 @@ public enum ComposeTranslate {
         if let image = svc.image {
             argv += [image]
         } else if svc.build != nil {
-            argv += [derivedTag(projectName: projectName, serviceName: serviceName)]
+            argv += [ComposeNaming.imageTag(project: project, service: serviceName)]
         } else {
             warnings.append(Warning(
                 kind: .unsupportedValue, service: serviceName,
@@ -162,7 +162,7 @@ public enum ComposeTranslate {
         noCache: Bool = false
     ) -> (argv: [String], tag: String)? {
         guard let svc = project.services[serviceName], let build = svc.build else { return nil }
-        let tag = derivedTag(projectName: project.name ?? "compose", serviceName: serviceName)
+        let tag = ComposeNaming.imageTag(project: project, service: serviceName)
         let context = resolvePath(build.context, relativeTo: baseDirectory)
         var argv = ["build", "-t", tag]
         if noCache { argv += ["--no-cache"] }
@@ -247,10 +247,6 @@ public enum ComposeTranslate {
     }
 
     // MARK: helpers
-
-    static func derivedTag(projectName: String, serviceName: String) -> String {
-        "\(projectName)-\(serviceName.lowercased()):compose"
-    }
 
     /// Absolutize a relative path against `baseDirectory` (lexically — no filesystem
     /// access, so `..`/`.` are folded but symlinks are not resolved). Absolute and

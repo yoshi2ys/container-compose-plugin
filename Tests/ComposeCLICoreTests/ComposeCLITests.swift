@@ -30,11 +30,19 @@ struct ComposeCLITests {
         #expect(run.stderr.isEmpty)
     }
 
-    @Test("--help anywhere prints usage")
+    @Test("--help after a command prints that command's help and touches nothing")
     func helpFlag() async {
         let run = await runCLI(["up", "--help"])
         #expect(run.exitCode == 0)
-        #expect(run.stdout.contains("USAGE: container compose"))
+        #expect(run.stdout.contains("USAGE: container compose [-f <file>] [--profile <name>]... up"))
+        #expect(run.operations.isEmpty)
+    }
+
+    @Test("an extra positional is an error rather than a silent no-op")
+    func extraPositional() async {
+        let run = await runCLI(["up", "web"], files: Self.files)
+        #expect(run.exitCode == 1)
+        #expect(run.stderr.contains("takes no arguments, but got: web"))
         #expect(run.operations.isEmpty)
     }
 

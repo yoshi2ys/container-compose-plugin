@@ -99,7 +99,7 @@ public struct ComposeOrchestrator: Sendable {
                     try await engine.build(argv: build.argv)
                 }
                 if let argv = runArgsByService[serviceName] {
-                    try? await engine.remove(name: containerName(project: project, service: serviceName), force: true)
+                    try? await engine.remove(name: ComposeNaming.containerName(project: project, service: serviceName, domain: nil), force: true)
                     _ = try await engine.run(argv: argv)
                 }
             }
@@ -145,7 +145,7 @@ public struct ComposeOrchestrator: Sendable {
         case .failure: order = project.serviceNames.reversed()
         }
         for serviceName in order {
-            let name = containerName(project: project, service: serviceName)
+            let name = ComposeNaming.containerName(project: project, service: serviceName, domain: nil)
             try? await engine.stop(name: name, timeout: nil)
             try? await engine.remove(name: name, force: true)
         }
@@ -164,12 +164,8 @@ public struct ComposeOrchestrator: Sendable {
         var argv = ["logs"]
         if follow { argv += ["-f"] }
         if let tail { argv += ["-n", "\(tail)"] }
-        argv += [containerName(project: project, service: serviceName)]
+        argv += [ComposeNaming.containerName(project: project, service: serviceName, domain: nil)]
         return try await engine.forward(argv: argv)
-    }
-
-    private func containerName(project: ComposeProject, service: String) -> String {
-        project.services[service]?.containerName ?? "\(project.name ?? "compose")-\(service)"
     }
 
     /// Start the BuildKit builder if it is down — `container build` hangs and times
@@ -183,7 +179,7 @@ public struct ComposeOrchestrator: Sendable {
     /// Block until `dependency` satisfies its condition. Returns a warning (and proceeds)
     /// if it times out — `up` is best-effort and must never hang.
     private func awaitReadiness(_ dependency: Dependency, in project: ComposeProject) async throws -> Warning? {
-        let name = containerName(project: project, service: dependency.service)
+        let name = ComposeNaming.containerName(project: project, service: dependency.service, domain: nil)
         switch dependency.condition {
         case .started:
             return nil
