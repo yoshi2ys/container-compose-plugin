@@ -213,17 +213,19 @@ public struct ComposeOrchestrator: Sendable {
     /// started).
     ///
     /// The set comes from labels, not from names: renaming a service in the compose
-    /// file would otherwise strand the container started under the old name.
-    /// Containers whose service is no longer defined are removed last, after the
-    /// ones the file still describes.
+    /// file would otherwise strand the container started under the old name. A
+    /// container whose service is no longer in the file is removed *first*, since
+    /// nothing the file describes depends on it while it may depend on them.
+    ///
+    /// Profiles do not narrow this: `down` removes the whole project, so it takes no
+    /// profile set — passing one would suggest otherwise.
     @discardableResult
-    public func down(project: ComposeProject, activeProfiles: Set<String> = []) async throws -> [String] {
+    public func down(project: ComposeProject) async throws -> [String] {
         guard try await engine.systemRunning() else { throw OrchestratorError.systemNotRunning }
 
-        // `down` removes every container the project owns, so the shutdown order is
-        // computed with no profile filter: a profile-excluded service is still
-        // defined, and ordering it as an afterthought would drop it out of the
-        // dependency order this command promises.
+        // Every defined service takes part in the ordering, profile-excluded ones
+        // included: they still own containers this removes, and ordering them as an
+        // afterthought would drop them out of the dependency order.
         let order: [String]
         switch ComposeGraph.startupPlan(project, activeProfiles: []) {
         case .success(let plan): order = plan.shutdownOrder

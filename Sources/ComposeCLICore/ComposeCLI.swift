@@ -84,7 +84,7 @@ public enum ComposeCLI {
             return report(result, context)
 
         case .down:
-            let removed = try await orchestrator.down(project: loaded.project, activeProfiles: profiles)
+            let removed = try await orchestrator.down(project: loaded.project)
             let name = ComposeNaming.projectName(loaded.project)
             context.write(removed.isEmpty
                 ? "No containers to remove for \(name).\n"
