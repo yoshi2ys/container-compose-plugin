@@ -278,14 +278,17 @@ public enum ComposeTranslate {
     /// without ever calling `chown`, and this cannot tell them apart.
     static func chownWarning(service: String, source: String, target: String, user: String?) -> Warning? {
         // Only a *non-root* user avoids the chown. The official entrypoints guard it
-        // with `[ "$(id -u)" = "0" ]`, so `user: "0"` or `user: root` fails identically.
-        if let uid = user?.split(separator: ":").first.map(String.init),
+        // with `[ "$(id -u)" = "0" ]`, so `user: "0"` or `user: root` fails
+        // identically — whitespace and all, since YAML happily carries `user: "0 "`.
+        if let uid = user?.split(separator: ":").first
+            .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }),
             !uid.isEmpty, uid != "0", uid != "root" {
             return nil
         }
-        // Lexical normalization only (no filesystem access), so `/var/lib/mysql/`,
-        // `//var/lib/mysql` and `/var//lib/mysql` all reach the same key.
-        let path = URL(fileURLWithPath: target).standardizedFileURL.path
+        // Normalized by hand rather than through `URL`: this is a *container* path,
+        // and Foundation's path APIs may consult the host filesystem — which this
+        // layer must not do.
+        let path = normalizePosixPath(target)
         guard databaseDataDirectories.contains(path)
             || path == "/bitnami" || path.hasPrefix("/bitnami/")
         else { return nil }
@@ -303,6 +306,17 @@ public enum ComposeTranslate {
     }
 
     // MARK: helpers
+
+    /// Collapses `//`, `/./` and a trailing slash in a POSIX path. Purely lexical:
+    /// `..` is left alone (resolving it needs to know what is a symlink) and nothing
+    /// touches the filesystem.
+    static func normalizePosixPath(_ path: String) -> String {
+        let leadingSlash = path.hasPrefix("/")
+        let components = path.split(separator: "/").filter { $0 != "." }
+        let joined = components.joined(separator: "/")
+        if joined.isEmpty { return leadingSlash ? "/" : "" }
+        return leadingSlash ? "/" + joined : joined
+    }
 
     /// Absolutize a relative path against `baseDirectory` (lexically — no filesystem
     /// access, so `..`/`.` are folded but symlinks are not resolved). Absolute and

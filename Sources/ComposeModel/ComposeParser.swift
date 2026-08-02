@@ -142,10 +142,16 @@ public enum ComposeParser {
         case .mapping(let mapping):
             var pairs: [(Node, Node)] = []
             for (key, value) in mapping {
-                let child = path.isEmpty ? (key.string ?? "") : "\(path).\(key.string ?? "")"
+                // The key is interpolated first so the value's error path names the
+                // key the file resolved to (`services.web.image`), not the template
+                // it was written as (`services.${SERVICE}.image`).
+                let asWritten = path.isEmpty ? (key.string ?? "") : "\(path).\(key.string ?? "")"
+                let newKey = try interpolate(
+                    key, path: asWritten, environment: environment, unset: &unset)
+                let resolved = path.isEmpty ? (newKey.string ?? "") : "\(path).\(newKey.string ?? "")"
                 pairs.append((
-                    try interpolate(key, path: child, environment: environment, unset: &unset),
-                    try interpolate(value, path: child, environment: environment, unset: &unset)
+                    newKey,
+                    try interpolate(value, path: resolved, environment: environment, unset: &unset)
                 ))
             }
             return .mapping(Node.Mapping(pairs, mapping.tag, mapping.style, mapping.mark, mapping.anchor))
