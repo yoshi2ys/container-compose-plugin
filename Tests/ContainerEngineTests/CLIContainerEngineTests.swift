@@ -133,6 +133,29 @@ struct CLIContainerEngineTests {
         #expect(collected.lines == ["first", "second"])
     }
 
+    @Test("dnsDomains reads the domain column and drops the header")
+    func dnsDomainsParsing() async throws {
+        let runner = FakeRunner()
+        runner.result = ProcessResult(
+            stdout: Data("DOMAIN\ntest\nlocal.dev\n".utf8), stderr: Data(), exitCode: 0)
+        let engine = CLIContainerEngine(runner: runner)
+        #expect(try await engine.dnsDomains() == ["test", "local.dev"])
+        #expect(runner.calls[0].arguments == ["container", "system", "dns", "list"])
+    }
+
+    @Test("dnsDomains survives an empty list and a future extra column")
+    func dnsDomainsEdgeCases() async throws {
+        let empty = FakeRunner()
+        empty.result = ProcessResult(stdout: Data("DOMAIN\n".utf8), stderr: Data(), exitCode: 0)
+        #expect(try await CLIContainerEngine(runner: empty).dnsDomains().isEmpty)
+
+        // A second column must not end up inside a container name.
+        let wide = FakeRunner()
+        wide.result = ProcessResult(
+            stdout: Data("DOMAIN  NAMESERVER\ntest  127.0.0.1\n".utf8), stderr: Data(), exitCode: 0)
+        #expect(try await CLIContainerEngine(runner: wide).dnsDomains() == ["test"])
+    }
+
     @Test("captured command non-zero exit throws EngineError with argv and stderr")
     func nonZeroThrows() async throws {
         let runner = FakeRunner()

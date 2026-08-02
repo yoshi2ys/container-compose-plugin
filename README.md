@@ -140,9 +140,17 @@ Apple `container` has rough edges that this plugin smooths over at `up` time:
 - **Compose-relative paths** — `build.context`, bind `source`, and `env_file`
   resolve against the **compose file's directory**, so `-f path/to/compose.yaml`
   works from any working directory (matching Docker Compose).
+- **Service-name DNS, when the host supports it** — register a local domain once
+  (`sudo container system dns create test`) and `up` names each container
+  `<service>.<project>.<domain>` and gives it `--dns-search <project>.<domain>`, so
+  `fastcgi_pass php:9000` reaches the `php` service. Two labels deep, so two projects
+  can each have a `web`. The registered domain is checked at every `up`, and after
+  the stack starts one service is asked to resolve another — because a *registered*
+  domain is not the same as a *working* one (see Limitations).
 - **`HOST_GATEWAY` injection** — every container gets `HOST_GATEWAY=<host gateway IP>`
   (a `host.docker.internal` stand-in), so apps can reach host-published ports of
-  sibling services despite there being no service-name DNS.
+  sibling services. Injected whether or not DNS is working, so there is always a path
+  that works.
 - **`depends_on: service_healthy` / `service_completed_successfully`** — emulated by
   polling the dependency's `healthcheck` (via `container exec`) or its run state
   before starting dependents. Bounded by the healthcheck's retries/interval.
@@ -185,12 +193,43 @@ These are surfaced as warnings at `up` time:
 |---|---|
 | `restart` | No restart policy in `container`; warned (not enforced) |
 | `healthcheck` | No native healthchecks; the plugin **emulates** `depends_on: service_healthy` by polling the check at `up` (exit status of a completed container is unverifiable, though) |
-| service-name DNS | Containers don't resolve each other by name; reach siblings via the injected `HOST_GATEWAY` + their published ports |
+| service-name DNS | Works only when a local domain is registered **and** the host resolves it — see the note below |
 | multiple `networks` per service | Only the first network is attached; the rest are warned |
 | port ranges | Single ports only |
 | bind mounts | Directories only (files are flagged); may be read-only for non-root container users |
 | bind mounts at a database data directory | Writes go through but `chown` does not, so the official mysql / mariadb / postgres entrypoints die on `Operation not permitted`. Flagged before `up`, with both ways out: a named volume (keeps first-run initialization) or an overridden entrypoint (skips it) |
 | privileged host ports (<1024) | May require elevated permissions on macOS |
+
+### Service-name DNS and the macOS 27 developer beta
+
+`container system dns create <domain>` registers a domain with the engine, and a
+container named `<label>.<domain>` lands in the engine's resolver. Containers reach
+that resolver through the host's system resolver, and **that link is broken on the
+macOS 27 developer beta** (measured on 26A5388g with container CLI 1.1.0):
+
+```
+$ dig @127.0.0.1 -p 2053 web.demo.test +short    # the engine's own resolver
+192.168.64.15                                     # knows the name
+$ dns-sd -G v4v6 web.demo.test                    # what the host, and therefore
+... No Such Record                                # every container, actually sees
+```
+
+`scutil --dns` shows the resolver registered and reachable, yet mDNSResponder does
+not query it; `container system dns create test` writes
+`/etc/resolver/containerization.test` whose filename does not match the `domain test`
+inside it. This is a beta, so a later build may well fix it.
+
+The plugin does not guess. It probes at `up` time and tells you which mechanism is
+actually available:
+
+```
+warning: Containers are named under 'demo.test', but 'db' cannot resolve
+'web.demo.test'. ... Until then, reach siblings through HOST_GATEWAY and their
+published ports; nothing else in the stack is affected.
+```
+
+Nothing breaks either way — `HOST_GATEWAY` is always injected, `ps` / `down` / `logs`
+identify containers by label rather than by name, and the stack starts normally.
 
 `down` removes containers only — networks and named volumes are left in place, so
 data survives a `down`/`up` cycle. Remove them with `container network delete` /

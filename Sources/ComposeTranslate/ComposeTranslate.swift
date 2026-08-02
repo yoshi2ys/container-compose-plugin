@@ -17,22 +17,28 @@ public struct TranslateOptions: Sendable {
     /// Directory of the compose file. Relative `build`/bind/`env_file` paths resolve
     /// against this (Compose semantics), not the process CWD. `nil` leaves paths verbatim.
     public var baseDirectory: String?
-    /// Host gateway IP injected into every container as `HOST_GATEWAY` (a
-    /// `host.docker.internal` stand-in, since Apple `container` has no service DNS).
+    /// Host gateway IP injected into every container as `HOST_GATEWAY`. Kept even
+    /// when `dnsDomain` is set: it is the fallback whenever name resolution is not
+    /// actually working on the host (see `ComposeOrchestrator`).
     public var hostGateway: String?
+    /// The domain container names are qualified with, e.g. `demo.test`. `nil` leaves
+    /// names unqualified and no `--dns-search` added.
+    public var dnsDomain: String?
 
     public init(
         detach: Bool = true,
         removeOnExit: Bool = false,
         cidfilePath: String? = nil,
         baseDirectory: String? = nil,
-        hostGateway: String? = nil
+        hostGateway: String? = nil,
+        dnsDomain: String? = nil
     ) {
         self.detach = detach
         self.removeOnExit = removeOnExit
         self.cidfilePath = cidfilePath
         self.baseDirectory = baseDirectory
         self.hostGateway = hostGateway
+        self.dnsDomain = dnsDomain
     }
 }
 
@@ -81,7 +87,10 @@ public enum ComposeTranslate {
         if options.detach { argv += ["-d"] }
         if options.removeOnExit { argv += ["--rm"] }
 
-        argv += ["--name", ComposeNaming.containerName(project: project, service: serviceName, domain: nil)]
+        argv += [
+            "--name",
+            ComposeNaming.containerName(project: project, service: serviceName, domain: options.dnsDomain),
+        ]
         if let cid = options.cidfilePath { argv += ["--cidfile", cid] }
 
         argv += ["--label", "\(ComposeLabels.project)=\(projectName)"]
@@ -109,6 +118,11 @@ public enum ComposeTranslate {
         for cap in svc.capDrop { argv += ["--cap-drop", cap] }
         for server in svc.dns { argv += ["--dns", server] }
         for domain in svc.dnsSearch { argv += ["--dns-search", domain] }
+        // Lets a sibling be reached as `web` rather than `web.demo.test`. Skipped
+        // when the file sets `dns_search` itself — that is an explicit choice.
+        if let domain = options.dnsDomain, svc.dnsSearch.isEmpty {
+            argv += ["--dns-search", domain]
+        }
 
         if svc.readOnly == true { argv += ["--read-only"] }
         if svc.initProcess == true { argv += ["--init"] }
@@ -129,6 +143,7 @@ public enum ComposeTranslate {
                       baseDirectory: options.baseDirectory)
         appendNetworks(svc, serviceName: serviceName, into: &argv, warnings: &warnings)
         appendGaps(svc, serviceName: serviceName, warnings: &warnings)
+        appendDNSGaps(svc, serviceName: serviceName, domain: options.dnsDomain, warnings: &warnings)
 
         let entrypointExtras = appendEntrypoint(svc, serviceName: serviceName, into: &argv, warnings: &warnings)
 

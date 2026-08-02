@@ -26,7 +26,9 @@
 ### 実機検証(container 1.1.0)
 
 - `container list --all --format json` の `configuration.labels` にプラグインのラベルが載る(D2 の成立条件)。
-- コンテナ名を FQDN にすると内部 DNS に登録され、参照側に `--dns-search` を渡せば短い名前で解決できる。**2条件の同時成立が必要**で、片方だけでは引けない(`--dns-domain` は不可)。解決されるのは**コンテナ名であって service 名ではない**(D3 の設計根拠)。
+- コンテナ名を FQDN にすると engine の resolver に登録される。参照側には `--dns-search` が要る(`--dns-domain` は不可)。解決されるのは**コンテナ名であって service 名ではない**(D3 の設計根拠)。
+- **2階層サブドメインは `dns create <domain>` 1回で足りる**(S1 実測)。`web.demo.test` も `api.myproj.test` も engine の resolver(`dig @127.0.0.1 -p 2053`)が応答する。よって命名は `<service>.<project>.<domain>` を既定にでき、プロジェクト間衝突が原理的に消える。
+- **ただし「ドメインが登録されている」ことは「解決が効く」ことの証拠にならない**(S1 実測)。engine の resolver はホストの loopback(127.0.0.1:2053)にのみ bind し、コンテナはホストのシステムリゾルバ経由でそこへ到達する。macOS 27 developer beta(26A5388g)+ container 1.1.0 では、`scutil --dns` に登録済み・Reachable と出るのに mDNSResponder がそのリゾルバへ問い合わせず、ホストもコンテナも NXDOMAIN になる(`dns-sd -G v4v6` で確認)。`dns create test` が作るファイルが `/etc/resolver/containerization.test` でファイル名とドメインが食い違う点も併存。beta なので後続ビルドで直る可能性があり、**バージョン判定ではなく実行時プローブで判断する**。
 - `container inspect` の `status` に exitCode が無い(`service_completed_successfully` の exit==0 検証は不能のまま)。
 
 ### コードベース検証(本改訂で確定)
@@ -111,12 +113,14 @@ func listContainers() async throws -> [ContainerSummary]
 
 **前提の訂正が起点。** README の Limitations と `todo.md` は「コンテナ間 DNS は存在しない → ゲートウェイ方式が唯一解」を確定事項としているが、これは検証の組み合わせ漏れによる false negative(検証済み前提を参照)。設計は「FQDN 化」ではなく「**命名の service 名ベース化**」。
 
+**判定は実測ベースにする。** `dns list` にドメインが載っていても解決が効くとは限らない(検証済み前提の3点目)。ドメインの有無だけで FQDN 命名に切り替えると、名前だけ変わって DNS が効かない=今より悪い状態になりうる。`up` の最後に「あるサービスから別サービスを実際に引けるか」を `exec` でプローブし、駄目なら warning で HOST_GATEWAY へ誘導する。HOST_GATEWAY 注入は常に行うので、どちらに転んでもスタックは動く。
+
 `up` の動作:
 
 1. `container system dns list` を照会(engine に `dnsDomains() -> [String]` を追加)。
 2. ドメイン選定 — project 名と一致する登録ドメインを優先、なければ先頭の1件。0件なら「`sudo container system dns create <project>` でサービス名解決が有効になる」と案内して従来動作(HOST_GATEWAY フォールバック)。
 3. ドメインが得られたら各サービスに付与:
-   - `--name <base>.<domain>` — `<base>` は `container_name` があればそれ、なければ **service 名そのもの**。
+   - `--name <service>.<project>.<domain>`(S1 が可だったため2階層を既定にし、衝突を原理的に消す)。`container_name` がある場合はその値を**そのまま**使い、ドメイン配下に入らない旨を warning で示す(compose ファイルが名前を明示しているものを書き換えない)。
    - `--dns-search <domain>` — サービスが `dns_search` を明示していない場合のみ。
 4. **衝突検出** — 命名が `<service>.<domain>` になるため、共有ドメインでは別プロジェクトの同名サービスと衝突しうる。`up` 冒頭で `listContainers()` を引き、同名かつ project ラベル不一致のコンテナが居たら blocking error(D2 の label ガードを再利用)。
 5. **`aliases` の warning(新規)** — service networks の `aliases` はパース済みだが `--name` は1つしか持てず実現不能。alias が service 名 / container_name と異なる場合、「alias '<x>' は DNS 登録されません。参照側は '<service>' を使ってください」と warning(goal 1・3 準拠 — 黙って落とさない)。

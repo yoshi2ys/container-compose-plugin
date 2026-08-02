@@ -122,6 +122,18 @@ public actor CLIContainerEngine: ContainerEngine {
         return try await runner.stream(executable, prefix + argv, onLine: onLine)
     }
 
+    public func dnsDomains() async throws -> [String] {
+        // `container system dns list` prints a `DOMAIN` header and one domain per
+        // line. It has no `--format json`, so the text is all there is.
+        let result = try await capture(["system", "dns", "list"])
+        // First whitespace-separated field per line, header dropped: a future column
+        // would otherwise become part of a container name and break `up` outright.
+        return result.stdoutString
+            .split(separator: "\n")
+            .compactMap { $0.split(whereSeparator: \.isWhitespace).first.map(String.init) }
+            .filter { !$0.isEmpty && $0.lowercased() != "domain" }
+    }
+
     public func listContainers() async throws -> [ContainerSummary] {
         let result = try await capture(["list", "--all", "--format", "json"])
         return try Self.decodeList(result.stdout)

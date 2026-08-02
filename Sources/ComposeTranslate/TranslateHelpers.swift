@@ -162,3 +162,36 @@ extension ComposeTranslate {
         return tokens
     }
 }
+
+extension ComposeTranslate {
+
+    /// What service-name DNS cannot honor.
+    static func appendDNSGaps(
+        _ svc: Service, serviceName: String, domain: String?, warnings: inout [Warning]
+    ) {
+        // `container run` takes one `--name`, so a service answers to exactly one
+        // name. An alias is unreachable whether or not a domain is in play, so this
+        // is reported unconditionally — `config` has no engine to ask for a domain.
+        let aliases = svc.networks.flatMap(\.aliases).filter { $0 != serviceName && $0 != svc.containerName }
+        for alias in Set(aliases).sorted() {
+            warnings.append(Warning(
+                kind: .engineGap(.serviceNameDNS), service: serviceName, key: "networks",
+                message: "Alias '\(alias)' is dropped — a container answers to one name only, so "
+                    + "nothing resolves '\(alias)'. Where a sibling would use it, use "
+                    + "'\(serviceName)' instead.",
+                severity: .warning))
+        }
+
+        // An explicit `container_name` is used verbatim, so a sibling resolves the
+        // service only when that name is exactly `<service>.<domain>`. A different
+        // name under the same domain still does not answer to the service name.
+        guard let domain, let explicit = svc.containerName,
+            explicit != "\(serviceName).\(domain)"
+        else { return }
+        warnings.append(Warning(
+            kind: .engineGap(.serviceNameDNS), service: serviceName, key: "container_name",
+            message: "container_name '\(explicit)' is used as written, so siblings cannot resolve "
+                + "'\(serviceName)'. Name it '\(serviceName).\(domain)' to put the service in DNS.",
+            severity: .warning))
+    }
+}

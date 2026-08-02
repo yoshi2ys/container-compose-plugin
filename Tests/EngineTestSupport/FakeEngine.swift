@@ -23,6 +23,11 @@ public actor FakeEngine: ContainerEngine {
     /// Lines each container's log will emit, keyed by container name. Seeded at init
     /// because `streamLogs` is `nonisolated` and cannot read actor state.
     private nonisolated let logLines: [String: [String]]
+    /// Domains `dnsDomains()` reports, and whether an in-container resolution probe
+    /// succeeds — the two are independent on purpose: a registered domain does not
+    /// mean resolution works.
+    private var domains: [String]
+    private var resolutionWorks: Bool
     /// Every mutating call, in order, as `"<verb>:<subject>"`. Reads are not
     /// recorded — every command issues them, and they would drown the signal.
     public private(set) var operations: [String] = []
@@ -47,9 +52,13 @@ public actor FakeEngine: ContainerEngine {
         forwardExit: Int32 = 0,
         containers: [ContainerSummary] = [],
         exiting: Set<String> = [],
-        logLines: [String: [String]] = [:]
+        logLines: [String: [String]] = [:],
+        dnsDomains: [String] = [],
+        resolutionWorks: Bool = true
     ) {
         self.logLines = logLines
+        self.domains = dnsDomains
+        self.resolutionWorks = resolutionWorks
         self.running = running
         self.builderUp = builderUp
         self.forwardExit = forwardExit
@@ -71,6 +80,9 @@ public actor FakeEngine: ContainerEngine {
     public func startBuilder() async throws { operations.append("builderstart") }
     public func hostGateway() async throws -> String? { nil }
     public func listContainers() async throws -> [ContainerSummary] { containers }
+    public func dnsDomains() async throws -> [String] { domains }
+    public func setDomains(_ value: [String]) { domains = value }
+    public func setResolutionWorks(_ value: Bool) { resolutionWorks = value }
 
     public nonisolated func streamLogs(
         name: String, follow: Bool, tail: Int?,
@@ -113,6 +125,9 @@ public actor FakeEngine: ContainerEngine {
 
     public func exec(name: String, argv: [String]) async throws -> Int32 {
         operations.append("exec:\(name)")
+        // A DNS probe is an exec too; answer it from `resolutionWorks` so a test can
+        // model "names registered, resolution broken" without scripting exec results.
+        if argv.contains(where: { $0.contains("getent hosts") }) { return resolutionWorks ? 0 : 1 }
         return execResults.isEmpty ? 0 : execResults.removeFirst()
     }
 

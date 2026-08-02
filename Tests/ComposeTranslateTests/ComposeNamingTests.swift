@@ -40,8 +40,30 @@ struct ComposeNamingTests {
     @Test("with a domain the name is a FQDN whose label is the service name")
     func fqdnNames() throws {
         let proj = try project(Self.sample)
-        #expect(ComposeNaming.containerName(project: proj, service: "web", domain: "test") == "web.test")
-        #expect(ComposeNaming.containerName(project: proj, service: "db", domain: "test") == "my-db.test")
+        #expect(ComposeNaming.containerName(project: proj, service: "web", domain: "demo.test") == "web.demo.test")
+    }
+
+    @Test("container_name is used verbatim, domain or not")
+    func containerNameWinsVerbatim() throws {
+        let proj = try project(Self.sample)
+        // The file is naming the container exactly; qualifying it would surprise
+        // anyone who wrote an FQDN there themselves. `runArgs` warns that such a
+        // name is not registered under the project's domain.
+        #expect(ComposeNaming.containerName(project: proj, service: "db", domain: "demo.test") == "my-db")
+        #expect(ComposeNaming.containerName(project: proj, service: "db", domain: nil) == "my-db")
+    }
+
+    @Test("the project's domain is two labels deep, so projects cannot collide")
+    func projectScopedDomain() throws {
+        let proj = try project(Self.sample)
+        #expect(ComposeNaming.dnsDomain(project: proj, registered: "test") == "demo.test")
+        #expect(ComposeNaming.dnsDomain(project: proj, registered: nil) == nil)
+        #expect(ComposeNaming.dnsDomain(project: proj, registered: "") == nil)
+        // two projects, same service name, different FQDNs
+        let other = try ComposeParser.parse("name: shop\nservices:\n  web:\n    image: x", projectNameFallback: "p").project
+        #expect(ComposeNaming.containerName(
+            project: other, service: "web",
+            domain: ComposeNaming.dnsDomain(project: other, registered: "test")) == "web.shop.test")
     }
 
     @Test("an empty domain is treated as no domain")

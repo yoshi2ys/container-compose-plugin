@@ -374,6 +374,112 @@ struct OrchestratorTests {
         #expect(ops.isEmpty)
     }
 
+    // MARK: - service-name DNS
+
+    private func dnsProject() throws -> ComposeProject {
+        try project("""
+        name: demo
+        services:
+          web:
+            image: x
+          db:
+            image: y
+        """)
+    }
+
+    @Test("with no registered domain, names stay unqualified and the fix is suggested")
+    func noDomainKeepsPlainNames() async throws {
+        let mock = FakeEngine()
+        let result = try await ComposeOrchestrator(engine: mock).up(project: try dnsProject())
+        #expect(await mock.operations == ["run:demo-db", "run:demo-web"])
+        let hint = try #require(result.warnings.first { $0.key == "dns" })
+        // A suggestion, so it stays out of the way until `--verbose` or `config`.
+        #expect(hint.severity == .info)
+        #expect(hint.message.contains("container system dns create"))
+    }
+
+    @Test("a registered domain qualifies every name under <project>.<domain>")
+    func registeredDomainQualifiesNames() async throws {
+        let mock = FakeEngine(dnsDomains: ["test"])
+        try await ComposeOrchestrator(engine: mock).up(project: try dnsProject())
+        #expect(await mock.operations.filter { $0.hasPrefix("run:") }
+            == ["run:db.demo.test", "run:web.demo.test"])
+    }
+
+    @Test("the run argv carries --dns-search so a sibling is reachable by its short name")
+    func dnsSearchIsAdded() async throws {
+        let mock = FakeEngine(dnsDomains: ["test"])
+        try await ComposeOrchestrator(engine: mock).up(project: try dnsProject())
+        let argv = try #require(await mock.runInvocations.first)
+        #expect(argv.firstIndex(of: "--dns-search").map { argv[$0 + 1] } == "demo.test")
+    }
+
+    /// The whole point of the probe: a domain being registered is not evidence that
+    /// anything resolves.
+    @Test("a registered domain whose names do not resolve is reported, not assumed to work")
+    func brokenResolutionIsReported() async throws {
+        let working = FakeEngine(dnsDomains: ["test"], resolutionWorks: true)
+        let quiet = try await ComposeOrchestrator(engine: working).up(project: try dnsProject())
+        #expect(!quiet.warnings.contains { $0.message.contains("cannot resolve") })
+
+        let broken = FakeEngine(dnsDomains: ["test"], resolutionWorks: false)
+        let loud = try await ComposeOrchestrator(engine: broken).up(project: try dnsProject())
+        let warning = try #require(loud.warnings.first { $0.key == "dns" && $0.severity == .warning })
+        // names the service that actually ran the probe, not whatever sorted first
+        #expect(warning.message.contains("'db' cannot resolve"))
+        #expect(warning.severity == .warning)
+        #expect(warning.message.contains("HOST_GATEWAY"))
+        #expect(warning.message.contains("macOS 27 developer beta"))
+        // the stack is up regardless — DNS is the nicer path, not the only one
+        #expect(loud.running == ["db", "web"])
+    }
+
+    @Test("a domain named after the project wins over the others")
+    func preferredDomainSelection() throws {
+        let proj = try dnsProject()
+        #expect(ComposeOrchestrator.preferredDomain(["zulu", "demo", "alpha"], project: proj) == "demo")
+        // otherwise a stable choice, not whatever order the engine happened to print
+        #expect(ComposeOrchestrator.preferredDomain(["zulu", "alpha"], project: proj) == "alpha")
+        #expect(ComposeOrchestrator.preferredDomain([], project: proj) == nil)
+    }
+
+    @Test("a service named by container_name is not used as the probe target")
+    func probeSkipsUnqualifiedTargets() async throws {
+        // `db` is deliberately outside the domain, so failing to resolve it says
+        // nothing about the host — blaming the resolver there would be wrong.
+        let proj = try project("""
+        name: demo
+        services:
+          app:
+            image: x
+          db:
+            image: y
+            container_name: legacy-db
+        """)
+        let mock = FakeEngine(dnsDomains: ["test"], resolutionWorks: false)
+        let result = try await ComposeOrchestrator(engine: mock).up(project: proj)
+        // The container_name warning is expected; the host-blaming probe one is not.
+        #expect(result.warnings.contains { $0.key == "container_name" })
+        #expect(!result.warnings.contains { $0.key == "dns" && $0.severity == .warning })
+    }
+
+    @Test("no probe when there is nothing to resolve against")
+    func noProbeForASingleService() async throws {
+        let proj = try project("name: demo\nservices:\n  web:\n    image: x\n")
+        let mock = FakeEngine(dnsDomains: ["test"], resolutionWorks: false)
+        let result = try await ComposeOrchestrator(engine: mock).up(project: proj)
+        #expect(!result.warnings.contains { $0.message.contains("cannot resolve") })
+    }
+
+    @Test("down and logs still find containers named under a domain, by label")
+    func labelLookupSurvivesQualifiedNames() async throws {
+        let proj = try dnsProject()
+        let mock = FakeEngine(dnsDomains: ["test"])
+        try await ComposeOrchestrator(engine: mock).up(project: proj)
+        let removed = try await ComposeOrchestrator(engine: mock).down(project: proj)
+        #expect(removed == ["web.demo.test", "db.demo.test"])
+    }
+
     // MARK: - identity by label
 
     @Test("down removes a container whose service was renamed in the compose file")
@@ -570,7 +676,7 @@ struct OrchestratorTests {
             ContainerSummary(id: "demo-db", image: "y", state: "running"),
         ]
         let conflicts = ComposeOrchestrator.conflicts(
-            project: proj, services: ["web", "db"], existing: existing)
+            project: proj, services: ["web", "db"], existing: existing, domain: nil)
         #expect(conflicts == [
             ContainerConflict(name: "demo-db", service: "db", owner: nil),
             ContainerConflict(name: "demo-web", service: "web", owner: "other"),
@@ -582,7 +688,7 @@ struct OrchestratorTests {
         let proj = try project("name: demo\nservices:\n  web:\n    image: x\n")
         let conflicts = ComposeOrchestrator.conflicts(
             project: proj, services: ["web"],
-            existing: [composeContainer(project: "demo", service: "web")])
+            existing: [composeContainer(project: "demo", service: "web")], domain: nil)
         #expect(conflicts.isEmpty)
     }
 

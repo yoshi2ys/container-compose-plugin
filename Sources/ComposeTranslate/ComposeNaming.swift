@@ -14,21 +14,31 @@ public enum ComposeNaming {
 
     /// The container name for a service.
     ///
-    /// Without a DNS domain: `container_name` if the service sets one, else
-    /// `<project>-<service>`.
+    /// `container_name` always wins, verbatim: the compose file is naming the
+    /// container exactly, and rewriting it would surprise anyone who wrote an FQDN
+    /// there themselves.
     ///
-    /// With a domain, the name becomes a FQDN — Apple `container` registers a
-    /// container in its internal resolver only when the name is fully qualified.
-    /// The label under the domain is the **service name** (or `container_name`),
-    /// so siblings reach it by the name the compose file uses.
+    /// Otherwise: `<project>-<service>`, or `<service>.<domain>` when a DNS domain
+    /// applies — Apple `container` registers a container in its resolver only when
+    /// the name is fully qualified, and the label under the domain is the service
+    /// name, so siblings reach it by the name the compose file uses.
     public static func containerName(
         project: ComposeProject, service: String, domain: String?
     ) -> String {
-        let explicit = project.services[service]?.containerName
-        guard let domain, !domain.isEmpty else {
-            return explicit ?? "\(projectName(project))-\(service)"
-        }
-        return "\(explicit ?? service).\(domain)"
+        if let explicit = project.services[service]?.containerName { return explicit }
+        guard let domain, !domain.isEmpty else { return "\(projectName(project))-\(service)" }
+        return "\(service).\(domain)"
+    }
+
+    /// The DNS domain a project's containers live under: `<project>.<registered>`.
+    ///
+    /// Two labels deep so two projects can each have a service called `web` without
+    /// fighting over `web.test`. Measured on container 1.1.0: the engine's resolver
+    /// answers for a two-label subdomain after a single
+    /// `container system dns create <registered>` — no separate registration needed.
+    public static func dnsDomain(project: ComposeProject, registered: String?) -> String? {
+        guard let registered, !registered.isEmpty else { return nil }
+        return "\(projectName(project)).\(registered)"
     }
 
     /// The tag given to an image built from a service's `build:` section.
