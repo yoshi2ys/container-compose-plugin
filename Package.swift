@@ -9,6 +9,7 @@ let package = Package(
         .library(name: "ComposeGraph", targets: ["ComposeGraph"]),
         .library(name: "ComposeTranslate", targets: ["ComposeTranslate"]),
         .library(name: "ContainerEngine", targets: ["ContainerEngine"]),
+        .library(name: "ComposeCLICore", targets: ["ComposeCLICore"]),
         .executable(name: "compose", targets: ["compose"]),
     ],
     dependencies: [
@@ -55,9 +56,19 @@ let package = Package(
             dependencies: ["ContainerEngine", "ComposeModel"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        .target(
+            name: "ComposeCLICore",
+            dependencies: ["ComposeModel", "ComposeGraph", "ComposeTranslate", "ContainerEngine"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "ComposeCLICoreTests",
+            dependencies: ["ComposeCLICore", "ComposeModel", "ContainerEngine"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
         .executableTarget(
             name: "compose",
-            dependencies: ["ComposeModel", "ComposeGraph", "ComposeTranslate", "ContainerEngine"],
+            dependencies: ["ComposeCLICore"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
     ]
