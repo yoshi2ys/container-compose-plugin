@@ -119,6 +119,9 @@ public protocol ContainerEngine: Sendable {
     /// Every container the engine knows about, running or not, with its labels —
     /// the source for identifying a project's containers.
     func listContainers() async throws -> [ContainerSummary]
+    /// Local DNS domains registered with `container system dns create`. A container
+    /// named `<label>.<domain>` is registered in the engine's resolver.
+    func dnsDomains() async throws -> [String]
     /// Stream a container's log lines as they arrive.
     ///
     /// `nonisolated` in the CLI implementation on purpose: a followed log lives as

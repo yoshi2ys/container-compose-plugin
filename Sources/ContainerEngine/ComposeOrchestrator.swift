@@ -82,12 +82,21 @@ public struct ComposeOrchestrator: Sendable {
         case .failure(let error): throw OrchestratorError.graph(error)
         }
 
-        // Inject the host gateway as HOST_GATEWAY (a `host.docker.internal` stand-in,
-        // since Apple container has no service-name DNS). Best-effort; never blocks up.
+        // Inject the host gateway as HOST_GATEWAY. It stays even when service-name
+        // DNS is in play: DNS is the nicer path, this is the one that always works.
         var options = options
         if options.hostGateway == nil {
             options.hostGateway = try? await engine.hostGateway()
         }
+        // A registered local DNS domain turns container names into FQDNs, which is
+        // what puts them in the engine's resolver. Best-effort: an engine without the
+        // subcommand simply has no domains.
+        if options.dnsDomain == nil {
+            let registered = Self.preferredDomain(
+                (try? await engine.dnsDomains()) ?? [], project: project)
+            options.dnsDomain = ComposeNaming.dnsDomain(project: project, registered: registered)
+        }
+        let domain = options.dnsDomain
 
         // Translate everything first; refuse to start if anything is blocking.
         var warnings: [Warning] = []
@@ -106,7 +115,8 @@ public struct ComposeOrchestrator: Sendable {
         // by label first: a container belonging to another project, or to nobody, is
         // not ours to destroy.
         let existing = try await engine.listContainers()
-        let conflicts = Self.conflicts(project: project, services: order, existing: existing)
+        let conflicts = Self.conflicts(
+            project: project, services: order, existing: existing, domain: domain)
         guard conflicts.isEmpty else { throw OrchestratorError.conflict(conflicts) }
 
         // `build:` needs the BuildKit builder up, or `container build` hangs and times
@@ -134,7 +144,7 @@ public struct ComposeOrchestrator: Sendable {
                 // profile) — they are never started, so there is nothing to wait for.
                 for dependency in service.dependsOn
                 where dependency.condition != .started && started.contains(dependency.service) {
-                    if let warning = try await awaitReadiness(dependency, in: project) {
+                    if let warning = try await awaitReadiness(dependency, in: project, domain: domain) {
                         warnings.append(warning)
                     }
                 }
@@ -149,7 +159,7 @@ public struct ComposeOrchestrator: Sendable {
                     // `container_name` would otherwise leave the old one running with
                     // the same labels, and two containers would answer for one service.
                     for stale in Self.staleContainers(
-                        for: serviceName, project: project, in: existing, domain: nil) {
+                        for: serviceName, project: project, in: existing, domain: domain) {
                         try? await engine.remove(name: stale.id, force: true)
                     }
                     _ = try await engine.run(argv: argv)
@@ -166,7 +176,7 @@ public struct ComposeOrchestrator: Sendable {
         var stopped: [String] = []
         for serviceName in order.sorted() {
             let container = Self.container(
-                for: serviceName, project: project, in: settled, domain: nil)
+                for: serviceName, project: project, in: settled, domain: domain)
             if container?.isRunning == true {
                 running.append(serviceName)
             } else if oneShot.contains(serviceName) {
@@ -174,6 +184,21 @@ public struct ComposeOrchestrator: Sendable {
             } else {
                 stopped.append(serviceName)
             }
+        }
+        if let domain {
+            if let probe = await resolutionWarning(
+                project: project, domain: domain, running: running, containers: settled) {
+                warnings.append(probe)
+            }
+        } else {
+            // Info, not a warning: it is a suggestion, and it would otherwise nag on
+            // every `up` of every stack that does not need service-name DNS.
+            warnings.append(Warning(
+                kind: .engineGap(.serviceNameDNS), key: "dns",
+                message: "No local DNS domain is registered, so services cannot reach each other by "
+                    + "name; they use HOST_GATEWAY and published ports. "
+                    + "`sudo container system dns create test` turns on name resolution.",
+                severity: .info))
         }
         return UpResult(
             warnings: warnings, running: running, completed: completed, stopped: stopped)
@@ -462,6 +487,63 @@ public struct ComposeOrchestrator: Sendable {
         return try await engine.forward(argv: argv)
     }
 
+    // MARK: - service-name DNS
+
+    /// Checks that a service can actually resolve a sibling by name, and explains it
+    /// if not.
+    ///
+    /// A registered domain is not evidence that resolution works. The engine's
+    /// resolver listens on the host's loopback, and the container reaches it through
+    /// the host's system resolver; if that link is not wired up, every name is
+    /// registered and none of them resolves. Measured on macOS 26A5388g with
+    /// container 1.1.0: `dig @127.0.0.1 -p 2053 web.demo.test` answers while
+    /// mDNSResponder returns "No Such Record" for the same name, so containers get
+    /// NXDOMAIN. macOS 27 is a developer beta at the time of writing, so this may
+    /// well be fixed in a later build — hence a runtime probe rather than a version
+    /// check or a blanket "unsupported".
+    ///
+    /// `HOST_GATEWAY` is injected either way, so a failing probe costs the user a
+    /// warning, not a broken stack.
+    private func resolutionWarning(
+        project: ComposeProject, domain: String, running: [String], containers: [ContainerSummary]
+    ) async -> Warning? {
+        // Needs somewhere to ask from, and a target that is actually under the
+        // domain — a service with an explicit `container_name` is not, and asking
+        // about it would blame the host for the compose file's own choice.
+        let started = running.compactMap {
+            Self.container(for: $0, project: project, in: containers, domain: domain)
+        }
+        guard let from = started.first,
+            let target = started.dropFirst().first(where: { $0.id.hasSuffix(".\(domain)") })
+        else { return nil }
+
+        // Whichever of these the image has.
+        let probe = "getent hosts \(target.id) || nslookup \(target.id) || ping -c1 -w1 \(target.id)"
+        guard let code = try? await engine.exec(name: from.id, argv: ["sh", "-c", probe]) else { return nil }
+        // 126/127 mean the shell or the tools are missing, not that the name failed
+        // to resolve. A distroless image must not be reported as broken DNS.
+        guard code != 0, code != 126, code != 127 else { return nil }
+
+        return Warning(
+            kind: .engineGap(.serviceNameDNS), key: "dns",
+            message: "Containers are named under '\(domain)', but '\(running[0])' cannot resolve "
+                + "'\(target.id)'. The domain is registered with the engine and the names are in "
+                + "its resolver, yet the host does not answer for them — on macOS that is the "
+                + "/etc/resolver wiring, which is broken on the macOS 27 developer beta and may be "
+                + "fixed in a later build. Until then, reach siblings through HOST_GATEWAY and "
+                + "their published ports; nothing else in the stack is affected.",
+            severity: .warning)
+    }
+
+    /// Which registered domain a project uses: one named after the project when the
+    /// user registered such a domain, otherwise the first in a stable order. Sorted
+    /// rather than "as listed" so the choice does not depend on the engine's output
+    /// order, which would rename every container when it changed.
+    static func preferredDomain(_ registered: [String], project: ComposeProject) -> String? {
+        let name = ComposeNaming.projectName(project)
+        return registered.first { $0 == name } ?? registered.sorted().first
+    }
+
     // MARK: - identity
 
     /// Containers carrying this project's label.
@@ -520,12 +602,12 @@ public struct ComposeOrchestrator: Sendable {
     /// Names this `up` would have to force-remove that belong to another project, or
     /// to no compose project at all.
     static func conflicts(
-        project: ComposeProject, services: [String], existing: [ContainerSummary]
+        project: ComposeProject, services: [String], existing: [ContainerSummary], domain: String?
     ) -> [ContainerConflict] {
         let projectName = ComposeNaming.projectName(project)
         let byName = Dictionary(existing.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         return services.sorted().compactMap { service in
-            let name = ComposeNaming.containerName(project: project, service: service, domain: nil)
+            let name = ComposeNaming.containerName(project: project, service: service, domain: domain)
             guard let container = byName[name] else { return nil }
             let owner = container.composeProject
             guard owner != projectName else { return nil }
@@ -543,8 +625,11 @@ public struct ComposeOrchestrator: Sendable {
 
     /// Block until `dependency` satisfies its condition. Returns a warning (and proceeds)
     /// if it times out — `up` is best-effort and must never hang.
-    private func awaitReadiness(_ dependency: Dependency, in project: ComposeProject) async throws -> Warning? {
-        let name = ComposeNaming.containerName(project: project, service: dependency.service, domain: nil)
+    private func awaitReadiness(
+        _ dependency: Dependency, in project: ComposeProject, domain: String?
+    ) async throws -> Warning? {
+        let name = ComposeNaming.containerName(
+            project: project, service: dependency.service, domain: domain)
         switch dependency.condition {
         case .started:
             return nil

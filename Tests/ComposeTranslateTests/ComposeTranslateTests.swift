@@ -305,6 +305,90 @@ struct ComposeTranslateTests {
         #expect(warnings.first?.service == "web")
     }
 
+    @Test("an alias that is not the service name cannot be registered, and says so")
+    func aliasWarning() throws {
+        let proj = try project("""
+        name: demo
+        services:
+          db:
+            image: mysql
+            networks:
+              backend:
+                aliases: [database, primary, db]
+        """)
+        let warnings = ComposeTranslate.runArgs(
+            serviceName: "db", project: proj,
+            options: TranslateOptions(dnsDomain: "demo.test")).warnings
+        let aliasWarnings = warnings.filter { $0.key == "networks" }
+        #expect(aliasWarnings.count == 2)  // `db` matches the service name, so it is fine
+        #expect(aliasWarnings.allSatisfy { $0.message.contains("only have one name") })
+        // An alias is unreachable with or without a domain, so `config` — which has
+        // no engine to ask for one — reports it too.
+        #expect(ComposeTranslate.runArgs(serviceName: "db", project: proj).warnings
+            .filter { $0.key == "networks" }.count == 2)
+    }
+
+    @Test("a container_name outside the domain is flagged as unreachable by name")
+    func containerNameOutsideDomainWarns() throws {
+        let proj = try project("""
+        name: demo
+        services:
+          web:
+            image: nginx
+            container_name: legacy-web
+        """)
+        let result = ComposeTranslate.runArgs(
+            serviceName: "web", project: proj, options: TranslateOptions(dnsDomain: "demo.test"))
+        #expect(result.argv.firstIndex(of: "--name").map { result.argv[$0 + 1] } == "legacy-web")
+        let warning = try #require(result.warnings.first { $0.key == "container_name" })
+        #expect(warning.message.contains("web.demo.test"))
+    }
+
+    @Test("a container_name under the domain but not matching the service still warns")
+    func containerNameWrongLabelWarns() throws {
+        let proj = try project("""
+        name: demo
+        services:
+          db:
+            image: mysql
+            container_name: db-primary.demo.test
+        """)
+        // It is in the domain, but a sibling asking for `db` still gets nothing.
+        let warning = try #require(
+            ComposeTranslate.runArgs(
+                serviceName: "db", project: proj, options: TranslateOptions(dnsDomain: "demo.test")
+            ).warnings.first { $0.key == "container_name" })
+        #expect(warning.message.contains("db.demo.test"))
+
+        // The one name that does work is not flagged.
+        let matching = try project("""
+        name: demo
+        services:
+          db:
+            image: mysql
+            container_name: db.demo.test
+        """)
+        #expect(ComposeTranslate.runArgs(
+            serviceName: "db", project: matching, options: TranslateOptions(dnsDomain: "demo.test")
+        ).warnings.filter { $0.key == "container_name" }.isEmpty)
+    }
+
+    @Test("an explicit dns_search wins over the project's domain")
+    func explicitDNSSearchWins() throws {
+        let proj = try project("""
+        name: demo
+        services:
+          web:
+            image: nginx
+            dns_search: [corp.example]
+        """)
+        let argv = ComposeTranslate.runArgs(
+            serviceName: "web", project: proj,
+            options: TranslateOptions(dnsDomain: "demo.test")).argv
+        #expect(argv.filter { $0 == "--dns-search" }.count == 1)
+        #expect(containsSlice(argv, ["--dns-search", "corp.example"]))
+    }
+
     // MARK: helper
 
     private func containsSlice(_ array: [String], _ slice: [String]) -> Bool {
