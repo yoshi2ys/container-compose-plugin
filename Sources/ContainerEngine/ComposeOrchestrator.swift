@@ -526,7 +526,8 @@ public struct ComposeOrchestrator: Sendable {
 
         return Warning(
             kind: .engineGap(.serviceNameDNS), key: "dns",
-            message: "Containers are named under '\(domain)', but '\(running[0])' cannot resolve "
+            message: "Containers are named under '\(domain)', but "
+                + "'\(from.composeService ?? from.id)' cannot resolve "
                 + "'\(target.id)'. The domain is registered with the engine and the names are in "
                 + "its resolver, yet the host does not answer for them — on macOS that is the "
                 + "/etc/resolver wiring, which is broken on the macOS 27 developer beta and may be "

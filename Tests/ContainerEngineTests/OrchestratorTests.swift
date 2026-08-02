@@ -424,7 +424,9 @@ struct OrchestratorTests {
 
         let broken = FakeEngine(dnsDomains: ["test"], resolutionWorks: false)
         let loud = try await ComposeOrchestrator(engine: broken).up(project: try dnsProject())
-        let warning = try #require(loud.warnings.first { $0.message.contains("cannot resolve") })
+        let warning = try #require(loud.warnings.first { $0.key == "dns" && $0.severity == .warning })
+        // names the service that actually ran the probe, not whatever sorted first
+        #expect(warning.message.contains("'db' cannot resolve"))
         #expect(warning.severity == .warning)
         #expect(warning.message.contains("HOST_GATEWAY"))
         #expect(warning.message.contains("macOS 27 developer beta"))

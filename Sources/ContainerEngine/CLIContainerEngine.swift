@@ -130,7 +130,7 @@ public actor CLIContainerEngine: ContainerEngine {
         // would otherwise become part of a container name and break `up` outright.
         return result.stdoutString
             .split(separator: "\n")
-            .compactMap { $0.split(separator: " ").first.map(String.init) }
+            .compactMap { $0.split(whereSeparator: \.isWhitespace).first.map(String.init) }
             .filter { !$0.isEmpty && $0.lowercased() != "domain" }
     }
 

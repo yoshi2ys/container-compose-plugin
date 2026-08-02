@@ -321,7 +321,7 @@ struct ComposeTranslateTests {
             options: TranslateOptions(dnsDomain: "demo.test")).warnings
         let aliasWarnings = warnings.filter { $0.key == "networks" }
         #expect(aliasWarnings.count == 2)  // `db` matches the service name, so it is fine
-        #expect(aliasWarnings.allSatisfy { $0.message.contains("only have one name") })
+        #expect(aliasWarnings.allSatisfy { $0.message.contains("answers to one name only") })
         // An alias is unreachable with or without a domain, so `config` — which has
         // no engine to ask for one — reports it too.
         #expect(ComposeTranslate.runArgs(serviceName: "db", project: proj).warnings

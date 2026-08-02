@@ -176,8 +176,9 @@ extension ComposeTranslate {
         for alias in Set(aliases).sorted() {
             warnings.append(Warning(
                 kind: .engineGap(.serviceNameDNS), service: serviceName, key: "networks",
-                message: "Alias '\(alias)' is not registered in DNS — a container can only have one name. "
-                    + "Reach this service as '\(serviceName)'.",
+                message: "Alias '\(alias)' is dropped — a container answers to one name only, so "
+                    + "nothing resolves '\(alias)'. Where a sibling would use it, use "
+                    + "'\(serviceName)' instead.",
                 severity: .warning))
         }
 
