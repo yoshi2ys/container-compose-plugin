@@ -104,6 +104,46 @@ public actor CLIContainerEngine: ContainerEngine {
         try await runner.runInheritingIO(executable, prefix + argv)
     }
 
+    public func listContainers() async throws -> [ContainerSummary] {
+        let result = try await capture(["list", "--all", "--format", "json"])
+        return try Self.decodeList(result.stdout)
+    }
+
+    /// `container list --format json` shape, narrowed to the fields we use.
+    private struct ListEntry: Decodable {
+        struct Configuration: Decodable {
+            struct Image: Decodable { let reference: String? }
+            struct Port: Decodable {
+                let hostAddress: String?
+                let hostPort: Int
+                let containerPort: Int
+                let proto: String?
+            }
+            let image: Image?
+            let labels: [String: String]?
+            let publishedPorts: [Port]?
+        }
+        struct Status: Decodable { let state: String? }
+        let id: String
+        let configuration: Configuration?
+        let status: Status?
+    }
+
+    static func decodeList(_ data: Data) throws -> [ContainerSummary] {
+        try JSONDecoder().decode([ListEntry].self, from: data).map { entry in
+            ContainerSummary(
+                id: entry.id,
+                image: entry.configuration?.image?.reference ?? "",
+                state: entry.status?.state ?? "",
+                labels: entry.configuration?.labels ?? [:],
+                ports: (entry.configuration?.publishedPorts ?? []).map {
+                    PublishedPort(
+                        hostAddress: $0.hostAddress, hostPort: $0.hostPort,
+                        containerPort: $0.containerPort, proto: $0.proto)
+                })
+        }
+    }
+
     /// Shared "is it up?" check for `system`/`builder status`: the CLI prints
     /// "... not running ..." even on a zero exit, so a negative phrase always wins;
     /// otherwise the per-call `positive` predicate decides (exit code or status text).

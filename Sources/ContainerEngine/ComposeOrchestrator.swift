@@ -7,6 +7,45 @@ public enum OrchestratorError: Error, Sendable {
     case systemNotRunning
     case graph(GraphError)
     case blocking([Warning])
+    /// `up` would have to destroy containers it does not own. Never done silently.
+    case conflict([ContainerConflict])
+}
+
+/// A container occupying a name this project needs, owned by someone else.
+/// `owner` is the other project's label, or `nil` when the container carries no
+/// compose labels at all (created by hand, or by `container run`).
+public struct ContainerConflict: Sendable, Equatable {
+    public let name: String
+    public let service: String
+    public let owner: String?
+
+    public init(name: String, service: String, owner: String?) {
+        self.name = name
+        self.service = service
+        self.owner = owner
+    }
+}
+
+/// What `up` did, beyond the warnings it collected.
+public struct UpResult: Sendable, Equatable {
+    public let warnings: [Warning]
+    /// Services whose container is running once the last wave finishes.
+    public let running: [String]
+    /// Services that have exited and were meant to: a one-shot job another service
+    /// waits on with `depends_on: service_completed_successfully`.
+    public let completed: [String]
+    /// Services that are not running and were not meant to exit.
+    public let stopped: [String]
+
+    public init(warnings: [Warning], running: [String], completed: [String], stopped: [String]) {
+        self.warnings = warnings
+        self.running = running
+        self.completed = completed
+        self.stopped = stopped
+    }
+
+    /// Every service `up` tried to start.
+    public var total: Int { running.count + completed.count + stopped.count }
 }
 
 /// Drives `up` / `down` / `ps` / `logs` over a `ContainerEngine`, using the pure
@@ -27,14 +66,14 @@ public struct ComposeOrchestrator: Sendable {
     }
 
     /// Bring the stack up: create prerequisites, then start services wave by wave
-    /// (dependency order). Returns the collected warnings. Validates the whole
-    /// project before mutating anything, so a blocking error starts nothing.
+    /// (dependency order). Validates the whole project before mutating anything, so
+    /// a blocking error — including a name owned by another project — starts nothing.
     @discardableResult
     public func up(
         project: ComposeProject,
         activeProfiles: Set<String> = [],
         options: TranslateOptions = TranslateOptions()
-    ) async throws -> [Warning] {
+    ) async throws -> UpResult {
         guard try await engine.systemRunning() else { throw OrchestratorError.systemNotRunning }
 
         let plan: StartupPlan
@@ -63,6 +102,13 @@ public struct ComposeOrchestrator: Sendable {
         let blocking = warnings.filter { $0.severity == .blocking }
         guard blocking.isEmpty else { throw OrchestratorError.blocking(blocking) }
 
+        // Recreating a service force-removes whatever holds its name. Check ownership
+        // by label first: a container belonging to another project, or to nobody, is
+        // not ours to destroy.
+        let existing = try await engine.listContainers()
+        let conflicts = Self.conflicts(project: project, services: order, existing: existing)
+        guard conflicts.isEmpty else { throw OrchestratorError.conflict(conflicts) }
+
         // `build:` needs the BuildKit builder up, or `container build` hangs and times
         // out; start it on demand before any build runs.
         if order.contains(where: { project.services[$0]?.build != nil }) {
@@ -77,9 +123,8 @@ public struct ComposeOrchestrator: Sendable {
             }
         }
 
-        // Start wave by wave. Recreate each container (force-remove any stale one with
-        // the same name first) so `up` is idempotent and recovers from a partial prior
-        // run; named volumes persist, so data is kept.
+        // Start wave by wave, recreating each container so `up` is idempotent and
+        // recovers from a partial prior run; named volumes persist, so data is kept.
         for wave in plan.waves {
             for serviceName in wave {
                 guard let service = project.services[serviceName] else { continue }
@@ -99,12 +144,39 @@ public struct ComposeOrchestrator: Sendable {
                     try await engine.build(argv: build.argv)
                 }
                 if let argv = runArgsByService[serviceName] {
-                    try? await engine.remove(name: ComposeNaming.containerName(project: project, service: serviceName, domain: nil), force: true)
+                    // Remove every container this project already has for the service,
+                    // not just the one under the name the file implies now: changing
+                    // `container_name` would otherwise leave the old one running with
+                    // the same labels, and two containers would answer for one service.
+                    for stale in Self.staleContainers(
+                        for: serviceName, project: project, in: existing, domain: nil) {
+                        try? await engine.remove(name: stale.id, force: true)
+                    }
                     _ = try await engine.run(argv: argv)
                 }
             }
         }
-        return warnings
+
+        // Ask the engine what actually survived, so a service that dies on startup is
+        // not counted as started.
+        let settled = try await engine.listContainers()
+        let oneShot = Self.oneShotServices(project)
+        var running: [String] = []
+        var completed: [String] = []
+        var stopped: [String] = []
+        for serviceName in order.sorted() {
+            let container = Self.container(
+                for: serviceName, project: project, in: settled, domain: nil)
+            if container?.isRunning == true {
+                running.append(serviceName)
+            } else if oneShot.contains(serviceName) {
+                completed.append(serviceName)
+            } else {
+                stopped.append(serviceName)
+            }
+        }
+        return UpResult(
+            warnings: warnings, running: running, completed: completed, stopped: stopped)
     }
 
     /// Build (or rebuild) images for services that declare a `build:` section —
@@ -136,36 +208,135 @@ public struct ComposeOrchestrator: Sendable {
         return builds.map(\.service)
     }
 
-    /// Stop and remove the stack's containers in reverse dependency order.
-    /// Errors per container are ignored (already gone / never started).
-    public func down(project: ComposeProject, activeProfiles: Set<String> = []) async throws {
+    /// Stop and remove every container labelled with this project, in reverse
+    /// dependency order. Errors per container are ignored (already gone / never
+    /// started).
+    ///
+    /// The set comes from labels, not from names: renaming a service in the compose
+    /// file would otherwise strand the container started under the old name.
+    /// Containers whose service is no longer defined are removed last, after the
+    /// ones the file still describes.
+    @discardableResult
+    public func down(project: ComposeProject, activeProfiles: Set<String> = []) async throws -> [String] {
+        guard try await engine.systemRunning() else { throw OrchestratorError.systemNotRunning }
+
         let order: [String]
         switch ComposeGraph.startupPlan(project, activeProfiles: activeProfiles) {
         case .success(let plan): order = plan.shutdownOrder
         case .failure: order = project.serviceNames.reversed()
         }
-        for serviceName in order {
-            let name = ComposeNaming.containerName(project: project, service: serviceName, domain: nil)
+
+        let owned = try await ownedContainers(project: project)
+        let byService = Dictionary(grouping: owned) { $0.composeService ?? "" }
+        let defined = Set(order)
+        // The services the file still describes, in shutdown order; then whatever
+        // carries our project label but matches no current service — a renamed or
+        // deleted one. It is still ours to remove.
+        let names = order.flatMap { byService[$0]?.map(\.id) ?? [] }
+            + owned.filter { !defined.contains($0.composeService ?? "") }.map(\.id)
+
+        for name in names {
             try? await engine.stop(name: name, timeout: nil)
             try? await engine.remove(name: name, force: true)
         }
+        return names
     }
 
-    /// List containers (passthrough to `container list --all`).
-    @discardableResult
-    public func ps() async throws -> Int32 {
-        try await engine.forward(argv: ["list", "--all"])
+    /// The project's containers, running or not, ordered by service name with
+    /// containers for undefined services last. Other projects' containers, and the
+    /// engine's own (`buildkit`), are excluded.
+    public func containers(project: ComposeProject) async throws -> [ContainerSummary] {
+        guard try await engine.systemRunning() else { throw OrchestratorError.systemNotRunning }
+        let defined = Set(project.serviceNames)
+        return try await ownedContainers(project: project).sorted { lhs, rhs in
+            let left = lhs.composeService ?? ""
+            let right = rhs.composeService ?? ""
+            if defined.contains(left) != defined.contains(right) { return defined.contains(left) }
+            return left == right ? lhs.id < rhs.id : left < right
+        }
     }
 
     /// Stream logs for a service (or the first service) — passthrough to `container logs`.
     @discardableResult
     public func logs(project: ComposeProject, service: String?, follow: Bool, tail: Int?) async throws -> Int32 {
         guard let serviceName = service ?? project.serviceNames.first else { return 1 }
+        let name = try await resolvedName(service: serviceName, project: project)
         var argv = ["logs"]
         if follow { argv += ["-f"] }
         if let tail { argv += ["-n", "\(tail)"] }
-        argv += [ComposeNaming.containerName(project: project, service: serviceName, domain: nil)]
+        argv += [name]
         return try await engine.forward(argv: argv)
+    }
+
+    // MARK: - identity
+
+    /// Containers carrying this project's label.
+    private func ownedContainers(project: ComposeProject) async throws -> [ContainerSummary] {
+        let name = ComposeNaming.projectName(project)
+        return try await engine.listContainers().filter { $0.composeProject == name }
+    }
+
+    /// The container name to address a service by: the one the engine actually has
+    /// under our labels, falling back to the name the file implies (it may not be
+    /// created yet).
+    private func resolvedName(service: String, project: ComposeProject) async throws -> String {
+        let containers = try await engine.listContainers()
+        return Self.container(for: service, project: project, in: containers, domain: nil)?.id
+            ?? ComposeNaming.containerName(project: project, service: service, domain: nil)
+    }
+
+    /// Every container this project holds for `service`: the label-matched ones,
+    /// plus whatever occupies the name the file implies now. `up` removes all of
+    /// them before recreating, so a rename leaves nothing behind.
+    static func staleContainers(
+        for service: String, project: ComposeProject, in containers: [ContainerSummary], domain: String?
+    ) -> [ContainerSummary] {
+        let projectName = ComposeNaming.projectName(project)
+        let derived = ComposeNaming.containerName(project: project, service: service, domain: domain)
+        return containers.filter {
+            ($0.composeProject == projectName && $0.composeService == service) || $0.id == derived
+        }
+    }
+
+    /// The container belonging to `service` in `project`. Prefers the one under the
+    /// name the file implies, so a leftover duplicate cannot mask the current
+    /// container's state; falls back to the derived name alone for containers that
+    /// predate labelling.
+    static func container(
+        for service: String, project: ComposeProject, in containers: [ContainerSummary], domain: String?
+    ) -> ContainerSummary? {
+        let candidates = staleContainers(
+            for: service, project: project, in: containers, domain: domain)
+        let derived = ComposeNaming.containerName(project: project, service: service, domain: domain)
+        return candidates.first { $0.id == derived } ?? candidates.first
+    }
+
+    /// Services that are meant to exit: the ones another service waits to complete.
+    /// Apple `container` does not report a stopped container's exit code, so a
+    /// one-shot job's *success* is unverifiable — but treating its exit as a failure
+    /// would flag every correct `up` of a seed/migration job.
+    static func oneShotServices(_ project: ComposeProject) -> Set<String> {
+        Set(project.services.values.flatMap { service in
+            service.dependsOn
+                .filter { $0.condition == .completedSuccessfully }
+                .map(\.service)
+        })
+    }
+
+    /// Names this `up` would have to force-remove that belong to another project, or
+    /// to no compose project at all.
+    static func conflicts(
+        project: ComposeProject, services: [String], existing: [ContainerSummary]
+    ) -> [ContainerConflict] {
+        let projectName = ComposeNaming.projectName(project)
+        let byName = Dictionary(existing.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return services.sorted().compactMap { service in
+            let name = ComposeNaming.containerName(project: project, service: service, domain: nil)
+            guard let container = byName[name] else { return nil }
+            let owner = container.composeProject
+            guard owner != projectName else { return nil }
+            return ContainerConflict(name: name, service: service, owner: owner)
+        }
     }
 
     /// Start the BuildKit builder if it is down — `container build` hangs and times

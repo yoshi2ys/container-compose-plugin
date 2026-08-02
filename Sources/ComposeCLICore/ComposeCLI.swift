@@ -37,10 +37,12 @@ public enum ComposeCLI {
     private static func execute(_ invocation: Invocation, _ context: CLIContext) async throws -> Int32 {
         let orchestrator = ComposeOrchestrator(engine: context.makeEngine())
         let profiles = invocation.profiles
+        // Every command reads the compose file: it names the project whose
+        // containers the command acts on, `ps` and `down` included.
+        let loaded = try loadProject(file: invocation.file, context: context)
 
         switch invocation.command {
         case .up:
-            let loaded = try loadProject(file: invocation.file, context: context)
             printWarnings(loaded.warnings, context)
             let included = ComposeGraph.includedServices(loaded.project, activeProfiles: profiles)
             printWarnings(
@@ -49,20 +51,20 @@ public enum ComposeCLI {
                     services: included, context: context),
                 context)
             let options = TranslateOptions(baseDirectory: loaded.baseDirectory)
-            let runWarnings = try await orchestrator.up(
+            let result = try await orchestrator.up(
                 project: loaded.project, activeProfiles: profiles, options: options)
-            printWarnings(runWarnings, context)
-            context.write("Started \(included.count) service(s).\n")
-            return 0
+            printWarnings(result.warnings, context)
+            return report(result, context)
 
         case .down:
-            let loaded = try loadProject(file: invocation.file, context: context)
-            try await orchestrator.down(project: loaded.project, activeProfiles: profiles)
-            context.write("Removed \(ComposeNaming.projectName(loaded.project)).\n")
+            let removed = try await orchestrator.down(project: loaded.project, activeProfiles: profiles)
+            let name = ComposeNaming.projectName(loaded.project)
+            context.write(removed.isEmpty
+                ? "No containers to remove for \(name).\n"
+                : "Removed \(removed.count) container(s) from \(name).\n")
             return 0
 
         case .build:
-            let loaded = try loadProject(file: invocation.file, context: context)
             printWarnings(loaded.warnings, context)
             for service in invocation.positionals where loaded.project.services[service] == nil {
                 return fail("no such service: \(service)", context)
@@ -80,10 +82,16 @@ public enum ComposeCLI {
             return 0
 
         case .ps:
-            return try await orchestrator.ps()
+            let containers = try await orchestrator.containers(project: loaded.project)
+            guard !containers.isEmpty else {
+                context.write(
+                    "No containers for \(ComposeNaming.projectName(loaded.project)). Start them with: container compose up\n")
+                return 0
+            }
+            context.write(ContainerTable.render(containers) + "\n")
+            return 0
 
         case .logs:
-            let loaded = try loadProject(file: invocation.file, context: context)
             let service = invocation.positionals.first
             if let service, loaded.project.services[service] == nil {
                 return fail("no such service: \(service)", context)
@@ -147,6 +155,22 @@ public enum ComposeCLI {
         }
     }
 
+    /// `up`'s closing line, and its exit code: a stack whose services all died is a
+    /// failure, however cleanly each `container run` returned. Services that were
+    /// meant to exit (one-shot jobs) count as started, not as casualties.
+    private static func report(_ result: UpResult, _ context: CLIContext) -> Int32 {
+        guard !result.stopped.isEmpty else {
+            context.write("Started \(result.total) service(s).\n")
+            return 0
+        }
+        let alive = result.running.count + result.completed.count
+        context.write("Started \(alive)/\(result.total) service(s).\n")
+        for service in result.stopped {
+            context.write("'\(service)' is not running. Check its log: container compose logs \(service)\n")
+        }
+        return result.running.isEmpty ? 1 : 0
+    }
+
     private static func describe(_ error: OrchestratorError) -> String {
         switch error {
         case .systemNotRunning:
@@ -155,6 +179,18 @@ public enum ComposeCLI {
             return "dependency error: \(graphError)"
         case .blocking(let warnings):
             return "cannot start:\n" + warnings.map { "  - \($0.message)" }.joined(separator: "\n")
+        case .conflict(let conflicts):
+            let lines = conflicts.map { conflict -> String in
+                let owner = conflict.owner.map { "project '\($0)'" } ?? "no compose project"
+                return "  - '\(conflict.name)' (service '\(conflict.service)') belongs to \(owner)"
+            }
+            return """
+                cannot start: these container names are taken by containers this project does not own:
+                \(lines.joined(separator: "\n"))
+
+                Starting would destroy them. Remove them yourself (container delete <name>), or give \
+                the service a free name with container_name:.
+                """
         }
     }
 

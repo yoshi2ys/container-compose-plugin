@@ -1,3 +1,4 @@
+import ContainerEngine
 import Testing
 
 @testable import ComposeCLICore
@@ -84,7 +85,7 @@ struct ComposeCLITests {
             ["up"],
             files: ["/work/compose.yaml": Self.stack, "/work/docker-compose.yml": "services: {}"])
         #expect(run.exitCode == 0)
-        #expect(run.operations == ["rm:demo-web", "run:demo-web", "rm:demo-worker", "run:demo-worker"])
+        #expect(run.operations == ["run:demo-web", "run:demo-worker"])
     }
 
     // MARK: - up
@@ -94,7 +95,7 @@ struct ComposeCLITests {
         let run = await runCLI(["up"], files: Self.files)
         #expect(run.exitCode == 0)
         #expect(run.stdout == "Started 2 service(s).\n")
-        #expect(run.operations == ["rm:demo-web", "run:demo-web", "rm:demo-worker", "run:demo-worker"])
+        #expect(run.operations == ["run:demo-web", "run:demo-worker"])
     }
 
     @Test("up counts only profile-included services")
@@ -113,6 +114,54 @@ struct ComposeCLITests {
 
         let withProfile = await runCLI(["--profile", "dev", "up"], files: files)
         #expect(withProfile.stdout == "Started 2 service(s).\n")
+    }
+
+    @Test("up refuses to destroy a container owned by another project")
+    func upForeignContainerConflict() async {
+        let engine = RecordingEngine(containers: [
+            composeContainer(project: "other", service: "www", name: "demo-web")
+        ])
+        let run = await runCLI(["up"], files: Self.files, engine: engine)
+        #expect(run.exitCode == 1)
+        #expect(run.stderr.contains("'demo-web' (service 'web') belongs to project 'other'"))
+        #expect(run.operations.isEmpty)
+    }
+
+    @Test("up refuses to destroy a container that carries no compose labels")
+    func upUnlabelledContainerConflict() async {
+        let engine = RecordingEngine(containers: [
+            ContainerSummary(id: "demo-web", image: "nginx", state: "running")
+        ])
+        let run = await runCLI(["up"], files: Self.files, engine: engine)
+        #expect(run.exitCode == 1)
+        #expect(run.stderr.contains("belongs to no compose project"))
+        #expect(run.operations.isEmpty)
+    }
+
+    @Test("up recreates the project's own containers without complaint")
+    func upRecreatesOwnContainers() async {
+        let engine = RecordingEngine(containers: [
+            composeContainer(project: "demo", service: "web")
+        ])
+        let run = await runCLI(["up"], files: Self.files, engine: engine)
+        #expect(run.exitCode == 0)
+        #expect(run.operations.contains("rm:demo-web"))
+    }
+
+    @Test("up reports a service that started and died, and where to look")
+    func upReportsExitedService() async {
+        let run = await runCLI(["up"], files: Self.files, engine: RecordingEngine(exiting: ["worker"]))
+        #expect(run.exitCode == 0)  // one service is still up
+        #expect(run.stdout.contains("Started 1/2 service(s)."))
+        #expect(run.stdout.contains("'worker' is not running. Check its log: container compose logs worker"))
+    }
+
+    @Test("up fails when every service died")
+    func upAllServicesDied() async {
+        let run = await runCLI(
+            ["up"], files: Self.files, engine: RecordingEngine(exiting: ["web", "worker"]))
+        #expect(run.exitCode == 1)
+        #expect(run.stdout.contains("Started 0/2 service(s)."))
     }
 
     @Test("up reports a stopped container system without touching containers")
@@ -192,19 +241,52 @@ struct ComposeCLITests {
 
     // MARK: - down / ps / logs / build
 
-    @Test("down removes the stack in reverse order and names the project")
+    @Test("down removes the project's containers in reverse order and counts them")
     func downRemoves() async {
-        let run = await runCLI(["down"], files: Self.files)
+        let engine = RecordingEngine(containers: [
+            composeContainer(project: "demo", service: "web"),
+            composeContainer(project: "demo", service: "worker"),
+            composeContainer(project: "other", service: "web", name: "other-web"),
+        ])
+        let run = await runCLI(["down"], files: Self.files, engine: engine)
         #expect(run.exitCode == 0)
-        #expect(run.stdout == "Removed demo.\n")
+        #expect(run.stdout == "Removed 2 container(s) from demo.\n")
         #expect(run.operations == ["stop:demo-worker", "rm:demo-worker", "stop:demo-web", "rm:demo-web"])
     }
 
-    @Test("ps forwards to `container list --all` and returns its exit code")
-    func psForwards() async {
-        let run = await runCLI(["ps"], files: Self.files, engine: RecordingEngine(forwardExit: 7))
-        #expect(run.exitCode == 7)
-        #expect(run.operations == ["forward:list --all"])
+    @Test("down says so when the project has nothing running")
+    func downNothing() async {
+        let run = await runCLI(["down"], files: Self.files)
+        #expect(run.exitCode == 0)
+        #expect(run.stdout == "No containers to remove for demo.\n")
+        #expect(run.operations.isEmpty)
+    }
+
+    @Test("ps prints only the project's containers, as a table")
+    func psTable() async {
+        let engine = RecordingEngine(containers: [
+            composeContainer(
+                project: "demo", service: "web", image: "nginx",
+                ports: [PublishedPort(hostAddress: "0.0.0.0", hostPort: 8080, containerPort: 80, proto: "tcp")]),
+            composeContainer(project: "other", service: "web", name: "other-web"),
+            ContainerSummary(id: "buildkit", image: "builder", state: "running"),
+        ])
+        let run = await runCLI(["ps"], files: Self.files, engine: engine)
+        #expect(run.exitCode == 0)
+        #expect(run.stdout == """
+            SERVICE  NAME      IMAGE  STATE    PORTS
+            web      demo-web  nginx  running  0.0.0.0:8080->80/tcp
+
+            """)
+        #expect(!run.stdout.contains("buildkit"))
+        #expect(!run.stdout.contains("other-web"))
+    }
+
+    @Test("ps on a stack that was never started points at up")
+    func psEmpty() async {
+        let run = await runCLI(["ps"], files: Self.files)
+        #expect(run.exitCode == 0)
+        #expect(run.stdout.contains("No containers for demo."))
     }
 
     @Test("logs defaults to the first service and passes --follow/--tail through")

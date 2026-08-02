@@ -35,6 +35,71 @@ struct CLIContainerEngineTests {
         #expect(runner.calls[0].arguments == ["container", "run", "-d", "--name", "demo-web", "nginx"])
     }
 
+    /// The JSON is a trimmed capture from `container list --all --format json`
+    /// (container CLI 1.1.0), so this pins the real shape rather than an invented one.
+    @Test("listContainers reads id, image, state, labels and published ports")
+    func listContainersDecodesEngineJSON() async throws {
+        let json = """
+            [
+              {
+                "id": "db",
+                "configuration": {
+                  "image": { "reference": "docker.io/library/mysql:8.4" },
+                  "labels": {
+                    "com.composeforcontainer.project": "lemp",
+                    "com.composeforcontainer.service": "db"
+                  },
+                  "publishedPorts": [
+                    { "containerPort": 3306, "count": 1, "hostAddress": "0.0.0.0",
+                      "hostPort": 13306, "proto": "tcp" }
+                  ]
+                },
+                "status": { "state": "stopped", "networks": [] }
+              },
+              {
+                "id": "buildkit",
+                "configuration": {
+                  "image": { "reference": "ghcr.io/apple/container-builder-shim/builder:0.12.0" },
+                  "labels": { "com.apple.container.plugin": "builder" },
+                  "publishedPorts": []
+                },
+                "status": { "state": "running", "networks": [] }
+              }
+            ]
+            """
+        let runner = FakeRunner()
+        runner.result = ProcessResult(stdout: Data(json.utf8), stderr: Data(), exitCode: 0)
+        let engine = CLIContainerEngine(runner: runner)
+
+        let containers = try await engine.listContainers()
+        #expect(runner.calls[0].arguments == ["container", "list", "--all", "--format", "json"])
+        #expect(containers.count == 2)
+
+        let db = try #require(containers.first)
+        #expect(db.id == "db")
+        #expect(db.image == "docker.io/library/mysql:8.4")
+        #expect(db.state == "stopped")
+        #expect(db.isRunning == false)
+        #expect(db.labels["com.composeforcontainer.project"] == "lemp")
+        #expect(db.ports.map(\.description) == ["0.0.0.0:13306->3306/tcp"])
+
+        #expect(containers[1].isRunning)
+        #expect(containers[1].ports.isEmpty)
+    }
+
+    @Test("listContainers tolerates entries with no image, labels or ports")
+    func listContainersTolerantOfSparseEntries() async throws {
+        let runner = FakeRunner()
+        runner.result = ProcessResult(
+            stdout: Data("""
+                [{ "id": "bare", "status": {} }]
+                """.utf8), stderr: Data(), exitCode: 0)
+        let engine = CLIContainerEngine(runner: runner)
+
+        let containers = try await engine.listContainers()
+        #expect(containers == [ContainerSummary(id: "bare", image: "", state: "")])
+    }
+
     @Test("captured command non-zero exit throws EngineError with argv and stderr")
     func nonZeroThrows() async throws {
         let runner = FakeRunner()

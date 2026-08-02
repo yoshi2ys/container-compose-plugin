@@ -119,6 +119,23 @@ Apple `container` has rough edges that this plugin smooths over at `up` time:
   before starting dependents. Bounded by the healthcheck's retries/interval.
 - **Idempotent `up`** — each container is recreated (stale one removed first), so a
   re-run recovers cleanly from a partial start. Named volumes persist.
+- **Labels identify the stack, not names** — every container carries
+  `com.composeforcontainer.project` / `.service`, and `ps` / `down` / `logs` look it
+  up by label. So `ps` shows your stack alone (no `buildkit`, no other projects), and
+  renaming a service in the compose file does not strand the container it started
+  under the old name — `down` still removes it.
+- **`up` will not take over a container it does not own** — recreating a service
+  force-removes whatever holds its name, so `up` checks the label first. A container
+  belonging to another project, or created outside compose, stops `up` with the
+  conflicting names listed. Nothing is started.
+- **`up` tells you what actually survived** — after the last wave it asks the engine
+  which containers are running, so a service that dies on startup is named along with
+  the command that shows why, instead of being counted as started:
+  ```
+  Started 1/2 service(s).
+  'broken' is not running. Check its log: container compose logs broken
+  ```
+  If nothing is left running, `up` exits non-zero.
 - **Bind-mount preflight** — a bind `source` that points at a file (Apple `container`
   mounts directories only) is flagged before it fails cryptically.
 
@@ -136,8 +153,13 @@ These are surfaced as warnings at `up` time:
 | bind mounts | Directories only (files are flagged); may be read-only for non-root container users |
 | privileged host ports (<1024) | May require elevated permissions on macOS |
 
-`ps` and `logs` pass through to `container`. Reach a published service on the host
-via its mapped port (e.g. `http://localhost:8080`).
+`down` removes containers only — networks and named volumes are left in place, so
+data survives a `down`/`up` cycle. Remove them with `container network delete` /
+`container volume delete` when you actually want them gone.
+
+Reach a published service on the host via its mapped port (e.g. `http://localhost:8080`).
+`ps` reads the compose file to know which project to list, so run it where the file is
+(or pass `-f`); `logs` passes through to `container logs`.
 
 ## How it works
 
