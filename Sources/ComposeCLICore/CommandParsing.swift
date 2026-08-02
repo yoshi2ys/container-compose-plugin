@@ -16,11 +16,14 @@ enum Command: String, CaseIterable {
             return SubcommandSpec(
                 summary: "Create and start the stack (dependency order)",
                 discussion: """
-                    Starts every service the active profiles include, in dependency order.
+                    Starts every service the active profiles include, in dependency order,
+                    then follows their logs until Ctrl-C, which stops the stack without
+                    removing it. Use --detach to start and return instead.
+
                     Each container is recreated, so a re-run recovers from a partial start;
                     named volumes persist.
                     """,
-                options: [],
+                options: [.detach],
                 positionals: .none(
                     hint: "`up` always starts the whole stack; starting a subset is not supported yet. "
                         + "Use `--profile <name>` to select a profile."))
@@ -141,11 +144,13 @@ enum CommandOption: String, CaseIterable {
     case follow = "--follow"
     case tail = "--tail"
     case noCache = "--no-cache"
+    case detach = "--detach"
 
     /// How the option is written in help, value placeholder included.
     var usageLabel: String {
         switch self {
         case .tail: return "--tail <n>"
+        case .detach: return "-d, --detach"
         case .follow, .noCache: return rawValue
         }
     }
@@ -155,6 +160,7 @@ enum CommandOption: String, CaseIterable {
         case .follow: return "Stream new log lines as they arrive"
         case .tail: return "Show only the last <n> lines"
         case .noCache: return "Build without the builder's layer cache"
+        case .detach: return "Start the stack and return, instead of following its logs"
         }
     }
 }
@@ -179,6 +185,7 @@ struct Invocation: Equatable {
     var follow = false
     var tail: Int?
     var noCache = false
+    var detach = false
     /// Show `.info` diagnostics, which are otherwise kept out of the way.
     var verbose = false
 }
@@ -208,6 +215,7 @@ enum CommandLineParser {
         var follow = false
         var tail: Int?
         var noCache = false
+        var detach = false
         var verbose = false
         var command: Command?
         var endOfOptions = false
@@ -254,7 +262,8 @@ enum CommandLineParser {
                     guard let command else {
                         return .failure("Unknown option '\(argument)'.\n\n\(usage)")
                     }
-                    guard let option = CommandOption(rawValue: argument),
+                    let spelled = argument == "-d" ? CommandOption.detach.rawValue : argument
+                    guard let option = CommandOption(rawValue: spelled),
                         command.spec.options.contains(option)
                     else {
                         return .failure(unknownOption(argument, command))
@@ -264,6 +273,8 @@ enum CommandLineParser {
                         follow = true
                     case .noCache:
                         noCache = true
+                    case .detach:
+                        detach = true
                     case .tail:
                         guard let raw = nextValue() else {
                             return .failure(missingValue(argument, "<n>", command))
@@ -299,7 +310,7 @@ enum CommandLineParser {
 
         return .run(Invocation(
             command: command, file: file, profiles: profiles, positionals: positionals,
-            follow: follow, tail: tail, noCache: noCache, verbose: verbose))
+            follow: follow, tail: tail, noCache: noCache, detach: detach, verbose: verbose))
     }
 
     // MARK: - validation

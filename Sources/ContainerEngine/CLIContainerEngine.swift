@@ -5,9 +5,12 @@ import Foundation
 /// Invokes via `/usr/bin/env container …` so it follows `PATH` regardless of
 /// install location. An `actor` to serialize process spawning.
 public actor CLIContainerEngine: ContainerEngine {
-    private let runner: ProcessRunner
-    private let executable: String
-    private let prefix: [String]
+    // `nonisolated` so `streamLogs` can spawn without entering the actor: these are
+    // immutable and `Sendable`, and a follow stream must not hold the actor for the
+    // lifetime of the stack.
+    private nonisolated let runner: ProcessRunner
+    private nonisolated let executable: String
+    private nonisolated let prefix: [String]
 
     /// - Parameters:
     ///   - runner: process seam (defaults to the real subprocess runner).
@@ -106,6 +109,17 @@ public actor CLIContainerEngine: ContainerEngine {
 
     public func forward(argv: [String]) async throws -> Int32 {
         try await runner.runInheritingIO(executable, prefix + argv)
+    }
+
+    public nonisolated func streamLogs(
+        name: String, follow: Bool, tail: Int?,
+        onLine: @escaping @Sendable (String) -> Void
+    ) async throws -> Int32 {
+        var argv = ["logs"]
+        if follow { argv += ["-f"] }
+        if let tail { argv += ["-n", "\(tail)"] }
+        argv += [name]
+        return try await runner.stream(executable, prefix + argv, onLine: onLine)
     }
 
     public func listContainers() async throws -> [ContainerSummary] {

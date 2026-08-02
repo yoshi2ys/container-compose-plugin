@@ -7,6 +7,24 @@ import Foundation
 /// `container compose …` — parses argv, loads the compose file, and drives the
 /// orchestrator. Returns the process exit code instead of calling `exit`, so the
 /// whole flow is testable; `Sources/compose` is a thin `@main` shim over this.
+/// A value written by a task and read once it finishes.
+private final class Box<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: Value?
+    var value: Value? {
+        get { lock.withLock { storage } }
+        set { lock.withLock { storage = newValue } }
+    }
+}
+
+/// Set from the signal handler, read after the task finishes.
+private final class InterruptFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func raise() { lock.withLock { value = true } }
+    var raised: Bool { lock.withLock { value } }
+}
+
 public enum ComposeCLI {
 
     public static func run(_ context: CLIContext) async -> Int32 {
@@ -47,6 +65,11 @@ public enum ComposeCLI {
         }
 
         switch invocation.command {
+        case .up where !invocation.detach:
+            return try await foregroundUp(
+                project: loaded.project, baseDirectory: loaded.baseDirectory, profiles: profiles,
+                orchestrator: orchestrator, context: context, verbose: invocation.verbose)
+
         case .up:
             let included = ComposeGraph.includedServices(loaded.project, activeProfiles: profiles)
             printWarnings(
@@ -102,9 +125,26 @@ public enum ComposeCLI {
             guard !loaded.project.serviceNames.isEmpty else {
                 return fail("no services defined in compose file", context)
             }
-            return try await orchestrator.logs(
-                project: loaded.project, service: service,
-                follow: invocation.follow, tail: invocation.tail)
+            // A named service passes straight through, so its output is untouched;
+            // with none named, every service is multiplexed under its own prefix.
+            if let service {
+                return try await orchestrator.logs(
+                    project: loaded.project, service: service,
+                    follow: invocation.follow, tail: invocation.tail)
+            }
+            let project = loaded.project
+            let printer = multiplexer(for: project, profiles: profiles, context: context)
+            let following = invocation.follow
+            let tail = invocation.tail
+            let interrupted = await untilInterrupted {
+                try? await orchestrator.follow(
+                    project: project, activeProfiles: profiles, follow: following, tail: tail
+                ) { service, line in
+                    printer.line(service, line)
+                }
+            }
+            restoreInterrupt()
+            return interrupted ? 130 : 0
 
         case .stop:
             let stopped = try await orchestrator.stop(project: loaded.project, activeProfiles: profiles)
@@ -183,6 +223,103 @@ public enum ComposeCLI {
         guard !names.isEmpty else { return "No containers to \(verb) in \(name).\n" }
         return "\(past) \(names.count) container(s) in \(name).\n"
     }
+
+    // MARK: - foreground up
+
+    /// Docker's foreground behavior: start the stack, follow every service's log,
+    /// and stop the containers — without removing them — when the logs end or the
+    /// user interrupts.
+    ///
+    /// SIGINT is trapped across the whole span, start phase included. Trapping it
+    /// only around the follow would leave a Ctrl-C during a slow pull or build
+    /// killing the process outright, with whatever containers it had already created
+    /// still running.
+    private static func foregroundUp(
+        project: ComposeProject, baseDirectory: String, profiles: Set<String>,
+        orchestrator: ComposeOrchestrator, context: CLIContext, verbose: Bool
+    ) async throws -> Int32 {
+        let printer = multiplexer(for: project, profiles: profiles, context: context)
+        let outcome = Box<Result<UpResult, Error>>()
+        let startCode = Box<Int32>()
+
+        let interrupted = await untilInterrupted {
+            do {
+                let result = try await orchestrator.up(
+                    project: project, activeProfiles: profiles,
+                    options: TranslateOptions(baseDirectory: baseDirectory))
+                outcome.value = .success(result)
+                // Reported here rather than after the follow, so the summary reaches
+                // the terminal before the logs it summarizes.
+                printWarnings(result.warnings, context, verbose: verbose)
+                startCode.value = report(result, context)
+                guard !result.running.isEmpty else { return }
+                try await orchestrator.follow(
+                    project: project, activeProfiles: profiles
+                ) { service, line in
+                    printer.line(service, line)
+                }
+            } catch {
+                outcome.value = .failure(error)
+            }
+        }
+
+        // Whatever the start produced is worth reporting before unwinding.
+        var code: Int32 = 0
+        var anythingToStop = true
+        switch outcome.value {
+        case .failure(let error):
+            restoreInterrupt()
+            throw error
+        case .success(let result):
+            code = startCode.value ?? 0
+            anythingToStop = !result.running.isEmpty
+        case .none:
+            // Interrupted before `up` returned; containers may exist regardless.
+            break
+        }
+
+        if anythingToStop {
+            context.write("Stopping\u{2026}\n")
+            _ = try await orchestrator.stop(project: project, activeProfiles: profiles)
+        }
+        restoreInterrupt()
+        // 130 is the shell's convention for "terminated by SIGINT".
+        return interrupted ? 130 : code
+    }
+
+    private static func multiplexer(
+        for project: ComposeProject, profiles: Set<String>, context: CLIContext
+    ) -> LogMultiplexer {
+        let included = ComposeGraph.includedServices(project, activeProfiles: profiles)
+        return LogMultiplexer(
+            services: project.serviceNames.filter(included.contains),
+            colour: context.isOutputTTY,
+            write: context.write)
+    }
+
+    /// Runs `body` to completion, or cancels it on Ctrl-C. Returns whether it was
+    /// interrupted.
+    ///
+    /// SIGINT's default disposition is disabled *before* the work starts, so no
+    /// interrupt can kill the process between the two, and stays disabled on return —
+    /// the caller usually has cleanup to do that a second Ctrl-C should not cut
+    /// short. `restoreInterrupt()` puts it back.
+    private static func untilInterrupted(_ body: @escaping @Sendable () async -> Void) async -> Bool {
+        let flag = InterruptFlag()
+        signal(SIGINT, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
+        let task = Task(operation: body)
+        source.setEventHandler {
+            flag.raise()
+            task.cancel()
+        }
+        source.resume()
+        await task.value
+        source.cancel()
+        return flag.raised
+    }
+
+    private static func restoreInterrupt() { signal(SIGINT, SIG_DFL) }
 
     // MARK: - helpers
 

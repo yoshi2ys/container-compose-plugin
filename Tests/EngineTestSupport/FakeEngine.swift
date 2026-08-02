@@ -20,6 +20,9 @@ public func composeContainer(
 /// with each phase, and a second copy of this would mean implementing every new
 /// method twice.
 public actor FakeEngine: ContainerEngine {
+    /// Lines each container's log will emit, keyed by container name. Seeded at init
+    /// because `streamLogs` is `nonisolated` and cannot read actor state.
+    private nonisolated let logLines: [String: [String]]
     /// Every mutating call, in order, as `"<verb>:<subject>"`. Reads are not
     /// recorded — every command issues them, and they would drown the signal.
     public private(set) var operations: [String] = []
@@ -43,8 +46,10 @@ public actor FakeEngine: ContainerEngine {
         builderUp: Bool = true,
         forwardExit: Int32 = 0,
         containers: [ContainerSummary] = [],
-        exiting: Set<String> = []
+        exiting: Set<String> = [],
+        logLines: [String: [String]] = [:]
     ) {
+        self.logLines = logLines
         self.running = running
         self.builderUp = builderUp
         self.forwardExit = forwardExit
@@ -66,6 +71,20 @@ public actor FakeEngine: ContainerEngine {
     public func startBuilder() async throws { operations.append("builderstart") }
     public func hostGateway() async throws -> String? { nil }
     public func listContainers() async throws -> [ContainerSummary] { containers }
+
+    public nonisolated func streamLogs(
+        name: String, follow: Bool, tail: Int?,
+        onLine: @escaping @Sendable (String) -> Void
+    ) async throws -> Int32 {
+        // No yielding between lines: a real reader delivers a whole chunk in a tight
+        // loop, and the multiplexer has to keep order and lose nothing under exactly
+        // that shape.
+        for line in logLines[name] ?? [] {
+            try Task.checkCancellation()
+            onLine(line)
+        }
+        return 0
+    }
 
     public func run(argv: [String]) async throws -> String {
         let name = value(after: "--name", in: argv) ?? "?"

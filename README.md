@@ -4,7 +4,8 @@ A `compose` **CLI plugin** for Apple's [`container`](https://github.com/apple/co
 run multi-container apps from a Docker Compose file as a first-class subcommand:
 
 ```sh
-container compose up      # start the stack (dependency order)
+container compose up      # start the stack and follow its logs (Ctrl-C stops it)
+container compose up -d   # start it and return
 container compose ps      # list the stack's containers
 container compose logs    # show logs
 container compose exec web sh   # run a command in a service's container
@@ -55,7 +56,7 @@ container compose --help
 container compose [-f <file>] [--profile <name>]... <command> [args]
 
 COMMANDS
-  up                       Create and start the stack (dependency order)
+  up [-d]                  Create and start the stack, then follow its logs
   down                     Stop and remove the stack (reverse order)
   start                    Start the stack's stopped containers
   stop                     Stop the containers without removing them
@@ -63,7 +64,7 @@ COMMANDS
   build [service...]       Build images for services with a build: section
   pull [service...]        Pull the images services declare
   ps                       List the stack's containers
-  logs [service]           Show logs
+  logs [service]           Show logs (every service, multiplexed, when none is named)
   exec <service> <cmd>...  Run a command in a service's container
   config                   Print the compose file with variables substituted
 
@@ -78,6 +79,11 @@ OPTIONS
 Each command has its own options and its own help — `container compose build --help`
 lists `--no-cache`, `container compose logs --help` lists `--follow` and `--tail <n>`.
 An option a command does not accept is an error, never a silent no-op.
+
+`up` runs in the foreground, like `docker compose up`: it follows every service's
+log under a `service |` prefix, one colour per service when stdout is a terminal.
+Ctrl-C stops the stack without removing it — `down` is what removes it. `-d` starts
+the stack and returns instead. `logs` with no service name uses the same multiplexer.
 
 Everything after `exec <service>` is passed through untouched, so
 `container compose exec web ls --all` reaches `ls`, not this parser. A TTY is
