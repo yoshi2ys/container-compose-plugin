@@ -141,8 +141,9 @@ Apple `container` has rough edges that this plugin smooths over at `up` time:
 - **Compose-relative paths** — `build.context`, bind `source`, and `env_file`
   resolve against the **compose file's directory**, so `-f path/to/compose.yaml`
   works from any working directory (matching Docker Compose).
-- **Service-name DNS, when the host supports it** — register a local domain once
-  (`sudo container system dns create test`) and `up` names each container
+- **Service-name DNS, when the host supports it** — set the domain up once (two
+  steps: `[dns] domain` in `config.toml`, then `sudo container system dns create test`
+  — see the note under Limitations) and `up` names each container
   `<service>.<project>.<domain>` and gives it `--dns-search <project>.<domain>`, so
   `fastcgi_pass php:9000` reaches the `php` service. Two labels deep, so two projects
   can each have a `web`. The registered domain is checked at every `up`, and after
@@ -213,22 +214,47 @@ These are surfaced as warnings at `up` time:
 
 ### Service-name DNS and the macOS 27 developer beta
 
-`container system dns create <domain>` registers a domain with the engine, and a
-container named `<label>.<domain>` lands in the engine's resolver. Containers reach
-that resolver through the host's system resolver, and **that link is broken on the
-macOS 27 developer beta** (measured on 26A5388g with container CLI 1.1.0):
+Setting up service-name DNS takes two steps, both described in Apple's
+[`docs/networking.md`](https://github.com/apple/container/blob/main/docs/networking.md):
+
+1. Put `[dns]` / `domain = "test"` in `~/.config/container/config.toml` and restart
+   the service (`container system stop && container system start`). This is the
+   engine's half: it registers containers under the domain and writes the domain
+   into each container's own `/etc/resolv.conf`.
+2. Run `sudo container system dns create test`. This is the host's half: it writes a
+   scoped resolver file under `/etc/resolver/`.
+
+Both halves end up at the same place. The engine's DNS server listens on
+`127.0.0.1:2053` and nowhere else
+([#1302](https://github.com/apple/container/issues/1302)), while a container's
+`/etc/resolv.conf` names the host gateway (`192.168.64.1`). The host *and* every
+container therefore reach the engine's resolver through macOS's system resolver — and
+**that link is broken on the macOS 27 developer beta**. Measured on 26A5421a (beta 7)
+with container CLI 1.1.0, with both steps above done:
 
 ```
-$ dig @127.0.0.1 -p 2053 web.demo.test +short    # the engine's own resolver
-192.168.64.15                                     # knows the name
-$ dns-sd -G v4v6 web.demo.test                    # what the host, and therefore
-... No Such Record                                # every container, actually sees
+$ dig @127.0.0.1 -p 2053 target.test +short   # the engine's own resolver
+192.168.64.2                                   # knows the name
+$ dns-sd -G v4v6 target.test                   # what the host sees
+... No Such Record
+$ nslookup target.test                         # what a sibling container sees
+** server can't find target.test: NXDOMAIN
 ```
 
-`scutil --dns` shows the resolver registered and reachable, yet mDNSResponder does
-not query it; `container system dns create test` writes
-`/etc/resolver/containerization.test` whose filename does not match the `domain test`
-inside it. This is a beta, so a later build may well fix it.
+`scutil --dns` shows the resolver registered and reachable, yet mDNSResponder never
+queries it. External names resolve from the same container, so only the scoped domain
+is affected. This is a beta, so a later build may fix it; nothing in container
+1.2.0–1.3.0 touches the DNS engine.
+
+Two dead ends, recorded so they are not chased again. The
+`/etc/resolver/containerization.test` filename not matching the `domain test` inside it
+is **not** the cause: `man 5 resolver` gives the `domain` directive priority, and the
+upstream report that claimed otherwise was withdrawn
+([#1407](https://github.com/apple/container/issues/1407)). And compose-style
+resolution by bare service name is not implemented upstream at all
+([#1809](https://github.com/apple/container/issues/1809),
+[#856](https://github.com/apple/container/issues/856)) — `docs/networking.md` says as
+much, and points at container IP addresses instead.
 
 The plugin does not guess. It probes at `up` time and tells you which mechanism is
 actually available:
